@@ -1,9 +1,10 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde_json::json;
-use sqlx::PgPool;
 
-pub async fn handler(State(pool): State<PgPool>) -> impl IntoResponse {
-    match sqlx::query("SELECT 1").execute(&pool).await {
+use crate::AppState;
+
+pub async fn handler(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query("SELECT 1").execute(&state.pg).await {
         Ok(_) => (
             StatusCode::OK,
             Json(json!({ "status": "ok", "db": "ok" })),
