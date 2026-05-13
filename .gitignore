@@ -1,0 +1,23 @@
+PRD.md
+roadmap.md
+
+# Dependencies
+node_modules/
+
+# Rust build output
+target/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# MCP config (contains API keys)
+.mcp.json
