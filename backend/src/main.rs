@@ -1,8 +1,7 @@
 mod health;
 mod recipes;
-mod upload;
 
-use axum::{Router, extract::DefaultBodyLimit, routing::{get, post}};
+use axum::{Router, routing::get};
 use dotenvy::dotenv;
 use r2d2_sqlite::SqliteConnectionManager;
 use recipes::SqlitePool;
@@ -60,8 +59,6 @@ async fn main() {
         .route("/health", get(health::handler))
         .route("/recipes/search", get(recipes::search))
         .route("/recipes/{id}", get(recipes::get_one))
-        .route("/internal/upload-db", post(upload::handler))
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)) // 2 GB
         .layer(cors)
         .with_state(state);
 

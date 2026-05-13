@@ -8,7 +8,7 @@ name = "backend"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.8", features = ["multipart"] }
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "macros"] }
 serde = { version = "1", features = ["derive"] }
