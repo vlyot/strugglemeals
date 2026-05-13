@@ -1,0 +1,12 @@
+{
+  "name": "strugglemeal",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --prefix-colors \"cyan,magenta\" --names \"frontend,backend\" \"npm run dev --prefix frontend\" \"cargo run --manifest-path backend/Cargo.toml\"",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "dev:backend": "cargo run --manifest-path backend/Cargo.toml"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

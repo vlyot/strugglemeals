@@ -3,6 +3,7 @@ roadmap.md
 
 # Dependencies
 node_modules/
+package-lock.json
 
 # Rust build output
 target/
