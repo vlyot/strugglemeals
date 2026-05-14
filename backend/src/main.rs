@@ -51,12 +51,15 @@ async fn main() {
 
     let state = AppState { pg, sqlite, http, gemini_api_key, groq_api_key };
 
-    let origin: HeaderValue = frontend_url
-        .parse()
-        .unwrap_or_else(|_| "http://localhost:5173".parse().unwrap());
+    // Support multiple comma-separated origins in FRONTEND_URL
+    let origins: Vec<HeaderValue> = frontend_url
+        .split(',')
+        .map(|s| s.trim())
+        .filter_map(|s| s.parse().ok())
+        .collect();
 
     let cors = CorsLayer::new()
-        .allow_origin(origin)
+        .allow_origin(origins)
         .allow_methods([Method::GET, Method::POST, Method::DELETE])
         .allow_headers([
             HeaderName::from_static("content-type"),
