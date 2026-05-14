@@ -4,21 +4,10 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use r2d2::Pool;
-use r2d2_sqlite::SqliteConnectionManager;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
 
-use crate::AppState;
-
-pub type SqlitePool = Arc<Pool<SqliteConnectionManager>>;
-
-impl axum::extract::FromRef<AppState> for SqlitePool {
-    fn from_ref(state: &AppState) -> Self {
-        state.sqlite.clone()
-    }
-}
+use crate::SqlitePool;
 
 // ---------------------------------------------------------------------------
 // Models

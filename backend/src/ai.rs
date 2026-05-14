@@ -125,7 +125,7 @@ async fn call_gemini(
     mime_type: &str,
 ) -> Result<Vec<String>, String> {
     let url = format!(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={}",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
         state.gemini_api_key
     );
 

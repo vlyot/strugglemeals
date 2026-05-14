@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO favourites (user_id, recipe_id, recipe_name)\n        VALUES ($1, $2, $3)\n        ON CONFLICT ON CONSTRAINT favourites_user_recipe_unique DO NOTHING\n        RETURNING id, saved_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "saved_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "3008b3621c32ac3d2dea1249b99716ba5c6b73f9b815bbc5fc245537c91c32f9"
+}

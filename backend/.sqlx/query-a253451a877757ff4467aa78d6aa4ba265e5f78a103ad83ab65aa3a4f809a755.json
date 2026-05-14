@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, recipe_id, recipe_name, cooked_at\n            FROM cook_history\n            WHERE user_id = $1\n              AND cooked_at > $2\n            ORDER BY cooked_at DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "recipe_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "recipe_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "cooked_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a253451a877757ff4467aa78d6aa4ba265e5f78a103ad83ab65aa3a4f809a755"
+}

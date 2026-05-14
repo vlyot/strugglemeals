@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \"userId\"::text AS user_id\n        FROM neon_auth.session\n        WHERE token = $1\n          AND \"expiresAt\" > NOW()\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "88be83589b13ee6fc8672ee99cd8f40278bc3790a4ed7f0c219dbe47319ef1c8"
+}

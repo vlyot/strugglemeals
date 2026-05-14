@@ -1,24 +1,15 @@
-mod ai;
-mod health;
-mod recipes;
-
-use axum::{Router, routing::{get, post}};
+use backend::{ai, favourites, health, history, recipes, AppState};
+use axum::{
+    Router,
+    http::{HeaderName, HeaderValue, Method},
+    routing::{delete, get, post},
+};
 use dotenvy::dotenv;
 use r2d2_sqlite::SqliteConnectionManager;
-use recipes::SqlitePool;
 use sqlx::postgres::PgPoolOptions;
 use std::{env, sync::Arc};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-#[derive(Clone)]
-pub struct AppState {
-    pub pg: sqlx::PgPool,
-    pub sqlite: SqlitePool,
-    pub http: reqwest::Client,
-    pub gemini_api_key: String,
-    pub groq_api_key: String,
-}
 
 #[tokio::main]
 async fn main() {
@@ -36,6 +27,8 @@ async fn main() {
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let gemini_api_key = env::var("GEMINI_API_KEY").unwrap_or_default();
     let groq_api_key = env::var("GROQ_API_KEY").unwrap_or_default();
+    let frontend_url = env::var("FRONTEND_URL")
+        .unwrap_or_else(|_| "http://localhost:5173".to_string());
 
     tracing::info!("Connecting to Postgres...");
     let pg = PgPoolOptions::new()
@@ -58,17 +51,34 @@ async fn main() {
 
     let state = AppState { pg, sqlite, http, gemini_api_key, groq_api_key };
 
+    let origin: HeaderValue = frontend_url
+        .parse()
+        .unwrap_or_else(|_| "http://localhost:5173".parse().unwrap());
+
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(origin)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_headers([
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("x-stack-refresh-token"),
+            HeaderName::from_static("x-stack-access-token"),
+        ])
+        .allow_credentials(true);
 
     let app = Router::new()
+        // Public
         .route("/health", get(health::handler))
         .route("/recipes/search", get(recipes::search))
         .route("/recipes/{id}", get(recipes::get_one))
         .route("/ai/identify-ingredients", post(ai::identify_ingredients))
         .route("/ai/present-recipe", post(ai::present_recipe))
+        // Auth-gated
+        .route("/history", post(history::record_cook))
+        .route("/history", get(history::list_history))
+        .route("/history/{id}", delete(history::delete_history_entry))
+        .route("/favourites", post(favourites::add_favourite))
+        .route("/favourites/{recipe_id}", delete(favourites::remove_favourite))
+        .route("/favourites", get(favourites::list_favourites))
         .layer(cors)
         .with_state(state);
 

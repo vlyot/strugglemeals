@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, recipe_id, recipe_name, saved_at\n        FROM favourites\n        WHERE user_id = $1\n        ORDER BY saved_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "recipe_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "recipe_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "saved_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "548e373ce6b04a4e6804c53a9c544dafda7feea2fdf6b13f35a44cb669858957"
+}
