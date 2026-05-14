@@ -1,4 +1,7 @@
 import { useEffect, useState } from "react"
+import { Link } from "react-router-dom"
+import { UserButton } from "@neondatabase/neon-js/auth/react"
+import { authClient } from "@/stack/client"
 import { cn } from "@/lib/utils"
 
 const navItems = [
@@ -9,6 +12,8 @@ const navItems = [
 ]
 
 export function Header() {
+  const { data: session } = authClient.useSession()
+  const user = session?.user ?? null
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const [isScrolled, setIsScrolled] = useState(false)
 
@@ -62,22 +67,43 @@ export function Header() {
           </nav>
 
           {/* CTA */}
-          <div className="hidden lg:block">
-            <a
-              href="#get-started"
-              className={cn(
-                "inline-flex items-center gap-2 px-6 py-3 text-sm tracking-normal transition-all duration-300",
-                scrolled
-                  ? "text-primary-foreground bg-primary hover:bg-primary/90"
-                  : "text-foreground bg-background hover:bg-accent"
-              )}
-              style={{ borderRadius: "0.75rem" }}
-            >
-              Try It Free
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 8l4 4m0 0l-4 4m4-4H3" />
-              </svg>
-            </a>
+          <div className="hidden lg:flex items-center gap-4">
+            {user ? (
+              <>
+                <Link
+                  to="/history"
+                  className={cn(
+                    "text-sm tracking-normal transition-colors duration-300",
+                    scrolled ? "text-muted-foreground hover:text-foreground" : "text-background/70 hover:text-background"
+                  )}
+                >
+                  History
+                </Link>
+                <Link
+                  to="/favourites"
+                  className={cn(
+                    "text-sm tracking-normal transition-colors duration-300",
+                    scrolled ? "text-muted-foreground hover:text-foreground" : "text-background/70 hover:text-background"
+                  )}
+                >
+                  Favourites
+                </Link>
+                <UserButton />
+              </>
+            ) : (
+              <Link
+                to="/handler/sign-in"
+                className={cn(
+                  "inline-flex items-center gap-2 px-6 py-3 text-sm tracking-normal transition-all duration-300",
+                  scrolled
+                    ? "text-primary-foreground bg-primary hover:bg-primary/90"
+                    : "text-foreground bg-background hover:bg-accent"
+                )}
+                style={{ borderRadius: "0.75rem" }}
+              >
+                Sign in →
+              </Link>
+            )}
           </div>
 
           {/* Mobile hamburger */}
@@ -131,18 +157,50 @@ export function Header() {
               {item.label}
             </a>
           ))}
-          <a
-            href="#get-started"
-            onClick={() => setIsMobileMenuOpen(false)}
-            className="mt-8 px-8 py-4 text-sm tracking-normal text-primary-foreground bg-primary"
-            style={{
-              transform: isMobileMenuOpen ? "translateY(0)" : "translateY(20px)",
-              opacity: isMobileMenuOpen ? 1 : 0,
-              transition: `all 0.5s ease-out ${isMobileMenuOpen ? navItems.length * 50 : 0}ms`,
-            }}
-          >
-            Try It Free
-          </a>
+          {user ? (
+            <>
+              <Link
+                to="/history"
+                onClick={() => setIsMobileMenuOpen(false)}
+                className="text-2xl font-sans tracking-[0.05em] text-foreground hover:text-accent"
+                style={{
+                  transform: isMobileMenuOpen ? "translateY(0)" : "translateY(20px)",
+                  opacity: isMobileMenuOpen ? 1 : 0,
+                  transition: `all 0.5s ease-out ${isMobileMenuOpen ? navItems.length * 50 : 0}ms`,
+                }}
+              >
+                History
+              </Link>
+              <Link
+                to="/favourites"
+                onClick={() => setIsMobileMenuOpen(false)}
+                className="text-2xl font-sans tracking-[0.05em] text-foreground hover:text-accent"
+                style={{
+                  transform: isMobileMenuOpen ? "translateY(0)" : "translateY(20px)",
+                  opacity: isMobileMenuOpen ? 1 : 0,
+                  transition: `all 0.5s ease-out ${isMobileMenuOpen ? (navItems.length + 1) * 50 : 0}ms`,
+                }}
+              >
+                Favourites
+              </Link>
+              <div className="mt-4">
+                <UserButton />
+              </div>
+            </>
+          ) : (
+            <Link
+              to="/handler/sign-in"
+              onClick={() => setIsMobileMenuOpen(false)}
+              className="mt-8 px-8 py-4 text-sm tracking-normal text-primary-foreground bg-primary"
+              style={{
+                transform: isMobileMenuOpen ? "translateY(0)" : "translateY(20px)",
+                opacity: isMobileMenuOpen ? 1 : 0,
+                transition: `all 0.5s ease-out ${isMobileMenuOpen ? navItems.length * 50 : 0}ms`,
+              }}
+            >
+              Sign in
+            </Link>
+          )}
         </nav>
       </div>
     </header>

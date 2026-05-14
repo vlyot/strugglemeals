@@ -46,7 +46,7 @@ export function HowItWorksSection() {
   }, [])
 
   return (
-    <section ref={sectionRef} id="how-it-works" className="relative py-32 md:py-48 overflow-hidden">
+    <section ref={sectionRef} id="how-it-works" className="relative py-20 md:py-36 lg:py-48 overflow-hidden">
       <div className="max-w-[1800px] mx-auto px-6 md:px-12 lg:px-20">
         <div className="grid lg:grid-cols-12 lg:gap-20">
           {/* Label */}
@@ -108,19 +108,31 @@ export function HowItWorksSection() {
                     className="w-full py-8 md:py-12 text-left"
                     aria-expanded={activeStep === index}
                   >
-                    <div className="grid md:grid-cols-12 gap-4 md:gap-8 items-start">
-                      <div className="md:col-span-3 flex items-center gap-4">
-                        <span className="font-mono text-xs tracking-wider text-muted-foreground">0{index + 1}</span>
-                        <span className="font-sans text-xl md:text-2xl text-foreground group-hover:text-accent transition-colors duration-300">
-                          {step.step}
-                        </span>
+                    {/* Mobile: step + toggle on one row, title below. Desktop: 12-col grid */}
+                    <div className="flex flex-col gap-2 md:grid md:grid-cols-12 md:gap-8 md:items-start">
+                      <div className="flex items-center justify-between md:col-span-3">
+                        <div className="flex items-center gap-3">
+                          <span className="font-mono text-xs tracking-wider text-muted-foreground">0{index + 1}</span>
+                          <span className="font-sans text-xl md:text-2xl text-foreground group-hover:text-accent transition-colors duration-300">
+                            {step.step}
+                          </span>
+                        </div>
+                        {/* Toggle visible on mobile inline, hidden in its own col on md+ */}
+                        <div className="md:hidden w-6 h-6 flex items-center justify-center">
+                          <span
+                            className="text-lg text-muted-foreground"
+                            style={{ transform: activeStep === index ? "rotate(45deg)" : "rotate(0)", transition: "transform 0.3s" }}
+                          >
+                            +
+                          </span>
+                        </div>
                       </div>
                       <div className="md:col-span-6">
-                        <h3 className="text-lg md:text-xl text-foreground/80 group-hover:text-foreground transition-colors duration-300">
+                        <h3 className="text-base md:text-xl text-foreground/80 group-hover:text-foreground transition-colors duration-300">
                           {step.title}
                         </h3>
                       </div>
-                      <div className="md:col-span-3 flex items-center justify-between">
+                      <div className="hidden md:flex md:col-span-3 items-center justify-between">
                         <span className="text-sm text-muted-foreground">{step.timing}</span>
                         <div className="w-6 h-6 flex items-center justify-center">
                           <span
@@ -142,8 +154,8 @@ export function HowItWorksSection() {
                       transition: "max-height 0.5s ease-out, opacity 0.5s ease-out",
                     }}
                   >
-                    <div className="pb-12 md:pb-16 grid md:grid-cols-12 gap-8">
-                      <div className="md:col-span-3" />
+                    <div className="pb-8 md:pb-16 grid md:grid-cols-12 gap-8">
+                      <div className="hidden md:block md:col-span-3" />
                       <div className="md:col-span-6 space-y-6">
                         <p className="text-muted-foreground leading-relaxed">{step.description}</p>
                         <ul className="grid grid-cols-2 gap-3">

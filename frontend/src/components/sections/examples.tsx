@@ -75,7 +75,7 @@ export function ExamplesSection() {
 
 
   return (
-    <section ref={sectionRef} id="examples" className="relative py-32 md:py-48 overflow-hidden bg-secondary">
+    <section ref={sectionRef} id="examples" className="relative py-20 md:py-36 lg:py-48 overflow-hidden bg-secondary">
       <div className="max-w-[1800px] mx-auto px-6 md:px-12 lg:px-20">
 
         {/* ── BEFORE ── */}
@@ -157,7 +157,7 @@ export function ExamplesSection() {
           <span className="text-xs tracking-[0.3em] uppercase text-muted-foreground">What it becomes instead</span>
         </div>
 
-        <div className="grid lg:grid-cols-12 gap-8 lg:gap-12">
+        <div className="grid lg:grid-cols-12 gap-6 lg:gap-12">
           {/* Garbage plate — the after */}
           <div className="lg:col-span-8 relative"
             style={{
@@ -181,14 +181,14 @@ export function ExamplesSection() {
           </div>
 
           {/* Recipe cards */}
-          <div className="lg:col-span-4 space-y-4">
+          <div className="lg:col-span-4 space-y-3">
             <p className="text-xs tracking-[0.3em] uppercase text-muted-foreground mb-2">Sample Recipes</p>
             {recipes.map((recipe, index) => (
               <button
                 key={recipe.id}
                 type="button"
                 onClick={() => setActiveRecipe(index)}
-                className={`w-full text-left p-6 md:p-8 transition-colors duration-500 rounded-xl ${
+                className={`w-full text-left p-4 md:p-6 transition-colors duration-500 rounded-xl ${
                   activeRecipe === index ? "bg-background" : "bg-background/50 hover:bg-background/70"
                 }`}
                 style={{

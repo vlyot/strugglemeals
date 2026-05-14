@@ -38,14 +38,14 @@ export function HeroSection() {
       {/* Bottom fade */}
       <div className="absolute inset-0" style={{ background: "linear-gradient(to top, rgba(11,6,3,0.6) 0%, rgba(11,6,3,0.1) 44%, transparent 100%)" }} />
 
-      {/* Bottom layout: headline left + copy/CTA right */}
-      <div className="absolute bottom-0 left-0 right-0 pb-20 md:pb-28 px-6 md:px-12 lg:px-20">
-        <div className="max-w-[1800px] mx-auto grid lg:grid-cols-2 gap-12 lg:gap-20 items-end">
+      {/* Bottom layout: stacked on mobile, side-by-side on lg */}
+      <div className="absolute bottom-0 left-0 right-0 pb-16 md:pb-24 lg:pb-28 px-5 md:px-12 lg:px-20">
+        <div className="max-w-[1800px] mx-auto grid lg:grid-cols-2 gap-8 lg:gap-20 items-end">
 
-          {/* Left: large serif headline */}
+          {/* Headline */}
           <div>
             <h1
-              className="font-serif text-5xl sm:text-6xl md:text-7xl lg:text-8xl font-light leading-[1.0] tracking-[-0.03em] text-background"
+              className="font-serif text-4xl sm:text-5xl md:text-6xl lg:text-7xl xl:text-8xl font-light leading-[1.05] tracking-[-0.02em] text-background"
               style={reveal("0.2s")}
             >
               <span className="block">What's in your fridge</span>
@@ -54,20 +54,20 @@ export function HeroSection() {
             </h1>
           </div>
 
-          {/* Right: sub-copy + CTA */}
-          <div className="space-y-8" style={reveal("0.5s")}>
-            <div className="flex items-center gap-4">
-              <div className="w-8 h-px bg-accent" />
-              <span className="text-xs tracking-[0.3em] uppercase text-background/70">
+          {/* Sub-copy + CTA */}
+          <div className="space-y-6 md:space-y-8" style={reveal("0.5s")}>
+            <div className="flex items-center gap-3">
+              <div className="w-6 h-px bg-accent shrink-0" />
+              <span className="text-xs tracking-[0.25em] uppercase text-background/70">
                 Feel like you've only got scraps?
               </span>
             </div>
-            <p className="text-lg md:text-xl leading-relaxed text-background/80 max-w-md">
+            <p className="text-base md:text-lg lg:text-xl leading-relaxed text-background/80 max-w-md">
               Snap what you have. Get a real recipe in seconds. No wasted groceries, no takeout guilt — just meals from whatever's already in your kitchen.
             </p>
             <a
               href="#get-started"
-              className="inline-flex items-center gap-3 bg-background text-foreground px-8 py-4 text-sm font-medium hover:bg-accent hover:text-foreground transition-colors duration-300 rounded-xl"
+              className="inline-flex items-center gap-3 bg-background text-foreground px-6 py-3 md:px-8 md:py-4 text-sm font-medium hover:bg-accent hover:text-foreground transition-colors duration-300 rounded-xl"
             >
               Start Cooking
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -78,9 +78,9 @@ export function HeroSection() {
         </div>
       </div>
 
-      {/* Bottom-center: scroll indicator */}
+      {/* Scroll indicator — hidden on small screens to avoid clutter */}
       <div
-        className="absolute bottom-8 left-1/2 -translate-x-1/2 flex flex-col items-center gap-3"
+        className="hidden sm:flex absolute bottom-8 left-1/2 -translate-x-1/2 flex-col items-center gap-3"
         style={reveal("0.8s")}
       >
         <span className="text-xs tracking-[0.3em] uppercase text-background/50">Scroll</span>

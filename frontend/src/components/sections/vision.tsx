@@ -11,7 +11,7 @@ import {
 const stats = [
   { value: "30 min", label: "Avg cook time" },
   { value: "90%", label: "Less food waste" },
-  { value: "500+", label: "Recipe variations" },
+  { value: "1.94M", label: "Recipes in our database" },
   { value: "Free", label: "To start" },
 ]
 
@@ -54,7 +54,7 @@ export function VisionSection() {
   })
 
   return (
-    <section ref={sectionRef} id="why-it-works" className="relative py-32 md:py-48 lg:py-64 overflow-hidden">
+    <section ref={sectionRef} id="why-it-works" className="relative py-20 md:py-36 lg:py-52 overflow-hidden">
       {/* Background grid */}
       <div className="absolute inset-0 pointer-events-none">
         <svg className="absolute top-0 left-0 w-full h-full opacity-[0.03]" viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -83,7 +83,7 @@ export function VisionSection() {
         </div>
 
         {/* Big text left + carousel right */}
-        <div className="grid lg:grid-cols-2 gap-16 lg:gap-24 items-center mb-24 md:mb-40">
+        <div className="grid lg:grid-cols-2 gap-10 lg:gap-24 items-center mb-16 md:mb-32 lg:mb-40">
           <div>
             <h2
               className="font-serif text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-light leading-[1.1] tracking-[-0.01em] text-foreground text-pretty"
@@ -98,7 +98,7 @@ export function VisionSection() {
               <CarouselContent>
                 {slides.map((slide) => (
                   <CarouselItem key={slide.src}>
-                    <div className="relative aspect-[4/3] overflow-hidden rounded-xl">
+                    <div className="relative aspect-[3/4] sm:aspect-[4/3] overflow-hidden rounded-xl bg-muted">
                       <img
                         src={slide.src}
                         alt={slide.alt}

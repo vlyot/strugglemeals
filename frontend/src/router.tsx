@@ -1,0 +1,31 @@
+import { createBrowserRouter, Navigate, Outlet } from "react-router-dom";
+import { AuthView } from "@neondatabase/neon-js/auth/react";
+import App from "./App";
+import HistoryPage from "./pages/HistoryPage";
+import FavouritesPage from "./pages/FavouritesPage";
+import { authClient } from "./stack/client";
+
+function ProtectedRoute() {
+  const { data: session, isPending } = authClient.useSession();
+  if (isPending) return null;
+  if (!session) return <Navigate to="/handler/sign-in" replace />;
+  return <Outlet />;
+}
+
+export const router = createBrowserRouter([
+  {
+    path: "/",
+    element: <App />,
+  },
+  {
+    path: "/handler/:pathParam?",
+    element: <AuthView />,
+  },
+  {
+    element: <ProtectedRoute />,
+    children: [
+      { path: "/history", element: <HistoryPage /> },
+      { path: "/favourites", element: <FavouritesPage /> },
+    ],
+  },
+]);

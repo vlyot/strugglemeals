@@ -47,7 +47,7 @@ export function PhilosophySection() {
     <section
       ref={sectionRef}
       id="philosophy"
-      className="relative py-32 md:py-48 bg-background overflow-hidden"
+      className="relative py-20 md:py-36 lg:py-48 bg-background overflow-hidden"
     >
       <div className="max-w-[1800px] mx-auto px-6 md:px-12 lg:px-20 relative">
         {/* Label */}
@@ -70,7 +70,7 @@ export function PhilosophySection() {
 
         {/* Headline */}
         <h2
-          className="font-serif text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-light leading-[1.1] tracking-[-0.01em] text-foreground max-w-3xl text-pretty mb-20 md:mb-32"
+          className="font-serif text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-light leading-[1.1] tracking-[-0.01em] text-foreground max-w-3xl text-pretty mb-12 md:mb-24 lg:mb-32"
           style={{
             opacity: isVisible ? 1 : 0,
             transform: isVisible ? "translateY(0)" : "translateY(40px)",

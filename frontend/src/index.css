@@ -1,15 +1,13 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "@fontsource-variable/playfair-display";
+@import "@fontsource-variable/plus-jakarta-sans";
 
 /* shadcn/tailwind.css is NOT imported — it re-introduces media-query dark mode */
 
 @theme inline {
-  --font-sans:    -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
-                  "Helvetica Neue", Arial, sans-serif;
-  --font-heading: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
-                  "Helvetica Neue", Arial, sans-serif;
-  --font-serif:   "Playfair Display Variable", "Playfair Display", Georgia, serif;
+  --font-sans:    "Plus Jakarta Sans Variable", "Plus Jakarta Sans", sans-serif;
+  --font-heading: "Plus Jakarta Sans Variable", "Plus Jakarta Sans", sans-serif;
+  --font-serif:   "Plus Jakarta Sans Variable", "Plus Jakarta Sans", sans-serif;
   --font-mono:    ui-monospace, "SF Mono", Consolas, monospace;
 
   /* Tailwind colour utilities → shadcn CSS vars */
