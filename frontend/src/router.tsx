@@ -3,6 +3,7 @@ import { AuthView } from "@neondatabase/neon-js/auth/react";
 import App from "./App";
 import HistoryPage from "./pages/HistoryPage";
 import FavouritesPage from "./pages/FavouritesPage";
+import CookPage from "./pages/CookPage";
 import { authClient } from "./stack/client";
 
 function ProtectedRoute() {
@@ -16,6 +17,10 @@ export const router = createBrowserRouter([
   {
     path: "/",
     element: <App />,
+  },
+  {
+    path: "/cook",
+    element: <CookPage />,
   },
   {
     path: "/handler/:pathParam?",

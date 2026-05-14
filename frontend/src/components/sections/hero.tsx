@@ -66,7 +66,7 @@ export function HeroSection() {
               Snap what you have. Get a real recipe in seconds. No wasted groceries, no takeout guilt — just meals from whatever's already in your kitchen.
             </p>
             <a
-              href="#get-started"
+              href="/cook"
               className="inline-flex items-center gap-3 bg-background text-foreground px-6 py-3 md:px-8 md:py-4 text-sm font-medium hover:bg-accent hover:text-foreground transition-colors duration-300 rounded-xl"
             >
               Start Cooking

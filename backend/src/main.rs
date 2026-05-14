@@ -72,6 +72,7 @@ async fn main() {
         .route("/recipes/{id}", get(recipes::get_one))
         .route("/ai/identify-ingredients", post(ai::identify_ingredients))
         .route("/ai/present-recipe", post(ai::present_recipe))
+        .route("/ai/theme-shortlist", post(ai::theme_shortlist))
         // Auth-gated
         .route("/history", post(history::record_cook))
         .route("/history", get(history::list_history))
