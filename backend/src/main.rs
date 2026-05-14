@@ -1,7 +1,8 @@
+mod ai;
 mod health;
 mod recipes;
 
-use axum::{Router, routing::get};
+use axum::{Router, routing::{get, post}};
 use dotenvy::dotenv;
 use r2d2_sqlite::SqliteConnectionManager;
 use recipes::SqlitePool;
@@ -14,6 +15,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 pub struct AppState {
     pub pg: sqlx::PgPool,
     pub sqlite: SqlitePool,
+    pub http: reqwest::Client,
+    pub gemini_api_key: String,
+    pub groq_api_key: String,
 }
 
 #[tokio::main]
@@ -30,6 +34,8 @@ async fn main() {
     let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let sqlite_path = env::var("SQLITE_PATH").unwrap_or_else(|_| "/data/recipes.db".to_string());
     let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let gemini_api_key = env::var("GEMINI_API_KEY").unwrap_or_default();
+    let groq_api_key = env::var("GROQ_API_KEY").unwrap_or_default();
 
     tracing::info!("Connecting to Postgres...");
     let pg = PgPoolOptions::new()
@@ -48,7 +54,9 @@ async fn main() {
     );
     tracing::info!("SQLite ready");
 
-    let state = AppState { pg, sqlite };
+    let http = reqwest::Client::new();
+
+    let state = AppState { pg, sqlite, http, gemini_api_key, groq_api_key };
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -59,6 +67,8 @@ async fn main() {
         .route("/health", get(health::handler))
         .route("/recipes/search", get(recipes::search))
         .route("/recipes/{id}", get(recipes::get_one))
+        .route("/ai/identify-ingredients", post(ai::identify_ingredients))
+        .route("/ai/present-recipe", post(ai::present_recipe))
         .layer(cors)
         .with_state(state);
 
