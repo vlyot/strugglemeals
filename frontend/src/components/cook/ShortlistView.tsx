@@ -48,18 +48,19 @@ function MatchBar({ score, total }: { score: number; total: number }) {
 
 function RecipeCard({
   entry,
-  featured,
+  open,
   presenting,
   userIngredients,
+  onToggle,
   onCook,
 }: {
   entry: ShortlistEntry
-  featured: boolean
+  open: boolean
   presenting: boolean
   userIngredients: string[]
+  onToggle: () => void
   onCook: () => void
 }) {
-  const [open, setOpen] = useState(featured)
   const [missingOpen, setMissingOpen] = useState(false)
   const [missingIngredients, setMissingIngredients] = useState<RawIngredient[] | null>(null)
   const [missingLoading, setMissingLoading] = useState(false)
@@ -82,15 +83,10 @@ function RecipeCard({
       .finally(() => setMissingLoading(false))
   }
 
-  // Auto-fetch missing for featured card on mount.
+  useEffect(() => {
+    if (open && entry.missing_count > 0) fetchMissing()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { if (featured && entry.missing_count > 0) fetchMissing() }, [])
-
-  const handleToggle = () => {
-    const next = !open
-    setOpen(next)
-    if (next) fetchMissing()
-  }
+  }, [open])
 
   const handleMissingClick = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -100,20 +96,19 @@ function RecipeCard({
   return (
     <div
       className={[
-        "rounded-2xl border bg-card transition-colors overflow-hidden",
+        "rounded-2xl border bg-card transition-colors duration-200 overflow-hidden",
         open ? "border-primary/30 shadow-sm" : "border-border cursor-pointer hover:border-primary/20",
       ].join(" ")}
-      onClick={!open ? handleToggle : undefined}
+      onClick={!open ? onToggle : undefined}
     >
-      {/* Always-visible header — compact row */}
-      <div className="flex items-center gap-3 px-5 py-4" onClick={open ? handleToggle : undefined} style={{ cursor: "pointer" }}>
+      {/* Always-visible header */}
+      <div
+        className="flex items-center gap-3 px-5 py-4"
+        style={{ cursor: "pointer" }}
+        onClick={open ? onToggle : undefined}
+      >
         <div className="flex flex-col gap-0.5 flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            {featured && (
-              <span className="text-xs font-semibold tracking-wider uppercase text-primary bg-primary/10 px-2 py-0.5 rounded-full">
-                Best match
-              </span>
-            )}
             <ThemeBadge theme={entry.theme} />
           </div>
           <h3 className="font-serif font-light text-xl leading-tight text-foreground truncate">
@@ -123,19 +118,23 @@ function RecipeCard({
             <p className="text-sm text-muted-foreground truncate">{entry.reason}</p>
           )}
         </div>
-        {/* Chevron indicator */}
         <svg
           width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"
-          className={["shrink-0 text-muted-foreground transition-transform duration-200", open ? "rotate-180" : ""].join(" ")}
+          className={["shrink-0 text-muted-foreground transition-transform duration-300", open ? "rotate-180" : ""].join(" ")}
         >
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </div>
 
-      {/* Expandable detail panel with CSS max-height animation */}
+      {/* Expandable panel */}
       <div
-        className="transition-all duration-300 ease-in-out overflow-hidden"
-        style={{ maxHeight: open ? "600px" : "0px" }}
+        className="overflow-hidden"
+        style={{
+          maxHeight: open ? "600px" : "0px",
+          transition: open
+            ? "max-height 0.45s cubic-bezier(0.4, 0, 0.2, 1)"
+            : "max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+        }}
       >
         <div className="flex flex-col gap-3 px-5 pb-5">
           <div className="h-px bg-border/50" />
@@ -163,7 +162,6 @@ function RecipeCard({
               )}
             </div>
 
-            {/* Missing list */}
             {missingOpen && (
               <div className="flex flex-col gap-1 pl-1">
                 {missingLoading ? (
@@ -175,7 +173,14 @@ function RecipeCard({
                 ) : (
                   missingIngredients?.map((item, i) => (
                     <div key={i} className="flex flex-col">
-                      <span className="text-xs text-muted-foreground">· {item.raw}</span>
+                      <div className="flex items-baseline gap-1.5">
+                        <span className="text-xs text-muted-foreground">· {item.raw}</span>
+                        {item.optional && (
+                          <span className="text-[10px] px-1.5 py-px rounded-full bg-muted text-muted-foreground/60 border border-border leading-tight shrink-0">
+                            optional
+                          </span>
+                        )}
+                      </div>
                       {item.hint && (
                         <span className="text-xs text-muted-foreground/50 pl-3 italic">{item.hint}</span>
                       )}
@@ -219,6 +224,8 @@ function ThemeSection({
   onCook: (entry: ShortlistEntry) => void
 }) {
   const meta = THEME_META[theme]
+  const [openId, setOpenId] = useState<number | null>(entries[0]?.id ?? null)
+
   if (entries.length === 0) {
     return (
       <div className="py-12 text-center text-muted-foreground text-sm">
@@ -241,13 +248,14 @@ function ThemeSection({
         </div>
       </div>
 
-      {entries.map((entry, i) => (
+      {entries.map((entry) => (
         <RecipeCard
           key={entry.id}
           entry={entry}
-          featured={i === 0}
+          open={openId === entry.id}
           presenting={presenting === entry.id}
           userIngredients={userIngredients}
+          onToggle={() => setOpenId(openId === entry.id ? null : entry.id)}
           onCook={() => onCook(entry)}
         />
       ))}

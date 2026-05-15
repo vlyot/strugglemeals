@@ -195,6 +195,7 @@ export async function* streamShortlist(
 export interface RawIngredient {
   raw: string;
   hint: string | null;
+  optional: boolean;
 }
 
 export interface RecipeDetail {

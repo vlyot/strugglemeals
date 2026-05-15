@@ -397,7 +397,7 @@ pub async fn theme_shortlist(
 // Pantry staples
 // ---------------------------------------------------------------------------
 
-fn is_pantry_staple_ai(ingredient: &str) -> bool {
+pub(crate) fn is_pantry_staple_ai(ingredient: &str) -> bool {
     const STAPLES: &[&str] = &[
         // Fats & oils
         "salt", "black pepper", "white pepper", "pepper", "olive oil",
@@ -1589,9 +1589,8 @@ Theme rules:
 - Light: salads, soups, eggs, fish, or clearly low-carb dishes
 - Filling: everything else (hearty mains, rice/pasta dishes, stews)
 
-Substitutions: include an entry for every ingredient where have=false.
-Steps: rewrite each direction as a clean imperative sentence. Preserve all detail but remove filler phrases.
-Do not include pantry staples (salt, pepper, oil, butter, flour, sugar, common spices) in substitutions."#;
+Substitutions: include an entry for every ingredient where have=false. Do not include pantry staples (salt, pepper, oil, butter, flour, sugar, common spices). For substitutes, always use the most general category-level description possible — never suggest a specific brand or named product. Examples: say "any neutral oil" not "vegetable oil", "any acid" not "white wine vinegar", "any crunchy pickle" not "cornichons", "any mild fresh chilli" not "serrano pepper". If an ingredient is regional or specialty (e.g. "Texas style hot pickled okra pods"), describe the category it fills in the dish ("any pickled vegetable for crunch and acidity") rather than guessing a direct swap.
+Steps: rewrite each direction as a clean imperative sentence. Preserve all detail but remove filler phrases."#;
 
     let user_message = format!(
         "Recipe title: {title}\n\nIngredients:\n{ingredients}\n\nDirections:\n{directions}\n\nUser has: {have}",

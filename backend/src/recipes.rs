@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::SqlitePool;
-use crate::ai::word_tokens;
+use crate::ai::{is_pantry_staple_ai, word_tokens};
 
 // ---------------------------------------------------------------------------
 // Substitution hints
@@ -53,11 +53,13 @@ pub(crate) fn hint_for(raw: &str) -> Option<&'static str> {
     })
 }
 
-/// A raw ingredient string paired with an optional substitution hint.
+/// A raw ingredient string paired with an optional substitution hint and an
+/// optional flag (true = pantry staple the user almost certainly has or can skip).
 #[derive(Debug, Serialize)]
 pub struct RawIngredient {
     pub raw: String,
     pub hint: Option<&'static str>,
+    pub optional: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -320,7 +322,12 @@ pub async fn get_one(
 
             let ingredients_raw = parse_json_arr(&raw_raw)
                 .into_iter()
-                .map(|r| RawIngredient { hint: hint_for(&r), raw: r })
+                .map(|r| {
+                    let r_lower = r.to_lowercase();
+                    let optional = is_pantry_staple_ai(&r_lower)
+                        || word_tokens(&r_lower).any(|t| is_pantry_staple_ai(t));
+                    RawIngredient { hint: hint_for(&r), raw: r, optional }
+                })
                 .collect();
 
             let detail = RecipeDetail {
