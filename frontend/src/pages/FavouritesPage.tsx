@@ -2,10 +2,18 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ThemeBadge } from "@/components/cook/IngredientInput";
 import { fetchFavourites, removeFavourite, type FavouriteEntry } from "@/lib/api";
 
-function formatDate(iso: string): string {
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(iso));
+function formatSavedDate(iso: string): string {
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(iso));
+}
+
+function deriveTheme(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.includes("salad") || lower.includes("soup") || lower.includes("light")) return "Light";
+  if (lower.includes("quick") || lower.includes("easy") || lower.includes("simple")) return "Quick";
+  return "Filling";
 }
 
 interface FavouriteCardProps {
@@ -25,30 +33,23 @@ function FavouriteCard({ entry, onRemove }: FavouriteCardProps) {
   return (
     <Card className="relative">
       <CardContent className="p-4">
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex-1 min-w-0">
-            <span
-              className="text-xs px-2 py-0.5 rounded-full border mb-2 inline-block"
-              style={{ color: "var(--color-primary)", borderColor: "var(--color-primary)" }}
-            >
-              Saved
-            </span>
-            <h3 className="font-semibold text-foreground text-sm leading-snug mb-1">{entry.recipe_name}</h3>
-            <p className="text-xs text-muted-foreground">Saved {formatDate(entry.saved_at)}</p>
-          </div>
+        <div className="flex items-start justify-between gap-2 mb-2">
+          <ThemeBadge theme={deriveTheme(entry.recipe_name)} />
           <button
             type="button"
             onClick={handleRemove}
             disabled={removing}
-            className="text-muted-foreground hover:text-destructive transition-colors shrink-0 mt-1"
+            className="text-muted-foreground hover:text-destructive transition-colors shrink-0"
             title="Remove from favourites"
           >
             ♥
           </button>
         </div>
+        <h3 className="font-semibold text-foreground text-sm leading-snug mb-1">{entry.recipe_name}</h3>
+        <p className="text-xs text-muted-foreground">Saved {formatSavedDate(entry.saved_at)}</p>
         <Link
-          to={`/?recipe=${entry.recipe_id}`}
-          className="mt-3 block w-full text-center text-sm font-medium text-primary hover:underline"
+          to="/cook"
+          className="mt-3 block w-full text-center text-sm font-medium text-primary-foreground bg-primary rounded-lg py-2 hover:bg-primary/90 transition-colors"
         >
           Cook →
         </Link>
@@ -75,10 +76,27 @@ export default function FavouritesPage() {
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="max-w-2xl mx-auto px-4 py-12">
-        <div className="flex items-center justify-between mb-8">
+      {/* Nav */}
+      <header className="sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur-sm">
+        <div className="max-w-2xl mx-auto px-4 h-14 flex items-center justify-between">
+          <Link to="/" className="font-serif text-lg font-light text-foreground tracking-tight">
+            StruggleMeals
+          </Link>
+          <span className="text-sm font-medium text-foreground">Favourites</span>
+          <Link to="/cook" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+            ← Cook
+          </Link>
+        </div>
+      </header>
+
+      <div className="max-w-2xl mx-auto px-4 py-8">
+        <div className="mb-6">
           <h1 className="text-2xl font-semibold text-foreground">Favourites</h1>
-          <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">← Back</Link>
+          {!loading && (
+            <p className="text-sm text-muted-foreground mt-1">
+              Kept indefinitely · {favourites.length} recipe{favourites.length !== 1 ? "s" : ""}
+            </p>
+          )}
         </div>
 
         {loading ? (
@@ -101,7 +119,7 @@ export default function FavouritesPage() {
 
         <div className="mt-10">
           <Link
-            to="/#get-started"
+            to="/cook"
             className="block w-full text-center px-6 py-3 text-sm font-medium rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
           >
             Find more recipes →

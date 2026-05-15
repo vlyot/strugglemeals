@@ -1,15 +1,15 @@
+import { useState } from "react"
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
-import { ThemeBadge } from "./IngredientInput"
 import { authClient } from "@/stack/client"
 import { addFavourite } from "@/lib/api"
-import { useState } from "react"
 import type { PresentResponse } from "@/lib/api"
 
 interface Props {
@@ -22,19 +22,58 @@ interface Props {
   error: string | null
 }
 
-function DifficultyBadge({ difficulty }: { difficulty: string }) {
-  const styles: Record<string, string> = {
-    Easy: "text-green-700 bg-green-50 border-green-200",
-    Medium: "text-amber-700 bg-amber-50 border-amber-200",
-    Hard: "text-red-700 bg-red-50 border-red-200",
+function SaveFooter({
+  recipeId,
+  recipeTitle,
+  isSignedIn,
+}: {
+  recipeId: number | null
+  recipeTitle: string
+  isSignedIn: boolean
+}) {
+  const [saved, setSaved] = useState(false)
+  const [saving, setSaving] = useState(false)
+
+  const handleSave = async () => {
+    if (!recipeId || saving || saved) return
+    setSaving(true)
+    try {
+      await addFavourite(recipeId, recipeTitle)
+      setSaved(true)
+    } catch {
+      // silently fail
+    } finally {
+      setSaving(false)
+    }
   }
+
   return (
-    <span
-      className={`text-xs font-medium px-2 py-0.5 rounded-full border ${styles[difficulty] ?? "bg-secondary"}`}
-    >
-      {difficulty}
-    </span>
+    <div className="px-6 pb-6 pt-4 flex flex-col gap-3 border-t border-border mt-2">
+      {isSignedIn ? (
+        <Button
+          onClick={handleSave}
+          disabled={saving || saved}
+          variant={saved ? "secondary" : "outline"}
+          className="w-full"
+        >
+          {saved ? "✓ Saved to favourites" : saving ? "Saving..." : "♡ Save to Favourites"}
+        </Button>
+      ) : (
+        <p className="text-sm text-muted-foreground text-center">
+          <a href="/handler/sign-in" className="text-primary hover:underline font-medium">
+            Sign in
+          </a>{" "}
+          to save recipes to your favourites
+        </p>
+      )}
+    </div>
   )
+}
+
+function stepCircleClass(i: number): string {
+  if (i === 0) return "bg-primary text-primary-foreground"
+  if (i === 1) return "bg-foreground text-background"
+  return "bg-muted text-muted-foreground"
 }
 
 export function RecipeModal({
@@ -48,21 +87,6 @@ export function RecipeModal({
 }: Props) {
   const { data: session } = authClient.useSession()
   const isSignedIn = !!session?.user
-  const [saved, setSaved] = useState(false)
-  const [saving, setSaving] = useState(false)
-
-  const handleSave = async () => {
-    if (!recipeId || saving || saved) return
-    setSaving(true)
-    try {
-      await addFavourite(recipeId, recipeTitle)
-      setSaved(true)
-    } catch {
-      // silently fail — show sign in nudge
-    } finally {
-      setSaving(false)
-    }
-  }
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -92,34 +116,50 @@ export function RecipeModal({
           </div>
         ) : response ? (
           <>
-            {/* Header */}
-            <div className="p-6 pb-4 border-b border-border">
+            {/* Dark header */}
+            <div className="p-6 pb-5 bg-foreground rounded-t-lg">
               <DialogHeader>
-                <DialogTitle className="font-serif text-2xl font-light leading-tight pr-4">
+                <div className="flex items-center gap-2 flex-wrap mb-2">
+                  {response.theme && (
+                    <span className="text-xs font-medium px-2 py-0.5 rounded-full border border-background/20 text-background/70">
+                      {response.theme}
+                    </span>
+                  )}
+                  <span className="text-xs font-medium px-2 py-0.5 rounded-full border border-background/20 text-background/70">
+                    {response.difficulty}
+                  </span>
+                  <span className="text-xs text-background/60">
+                    ⏱ {response.time_minutes} min
+                  </span>
+                </div>
+                <DialogTitle className="font-serif text-2xl font-light text-background leading-tight pr-4">
                   {recipeTitle}
                 </DialogTitle>
               </DialogHeader>
-              <div className="flex items-center gap-2 mt-3 flex-wrap">
-                <ThemeBadge theme={response.theme} />
-                <DifficultyBadge difficulty={response.difficulty} />
-                <span className="text-xs text-muted-foreground">
-                  {response.time_minutes} min
-                </span>
-                <span className="flex-1" />
-              </div>
               {response.description && (
-                <p className="text-sm text-muted-foreground mt-2 italic">
+                <p className="text-sm text-background/70 mt-2 leading-relaxed">
                   {response.description}
                 </p>
               )}
             </div>
 
-            <div className="p-6 flex flex-col gap-6">
-              {/* Ingredients */}
-              <section>
-                <h4 className="text-xs font-semibold tracking-widest uppercase text-muted-foreground mb-3">
-                  Ingredients
-                </h4>
+            {/* Tabbed content */}
+            <Tabs defaultValue="steps" className="flex-col">
+              <div className="px-6 pt-4">
+                <TabsList className="w-full h-10">
+                  <TabsTrigger value="ingredients" className="flex-1 h-full">
+                    Ingredients
+                  </TabsTrigger>
+                  <TabsTrigger value="steps" className="flex-1 h-full">
+                    Steps
+                  </TabsTrigger>
+                  <TabsTrigger value="subs" className="flex-1 h-full">
+                    Subs
+                  </TabsTrigger>
+                </TabsList>
+              </div>
+
+              <TabsContent value="ingredients" className="px-6 pb-2 mt-4">
                 <ul className="flex flex-col gap-2">
                   {response.ingredients.map((ing, i) => (
                     <li key={i} className="flex items-start gap-2 text-sm">
@@ -138,32 +178,30 @@ export function RecipeModal({
                     </li>
                   ))}
                 </ul>
-              </section>
+              </TabsContent>
 
-              {/* Steps */}
-              <section>
-                <h4 className="text-xs font-semibold tracking-widest uppercase text-muted-foreground mb-3">
-                  Steps
-                </h4>
-                <ol className="flex flex-col gap-3">
+              <TabsContent value="steps" className="px-6 pb-2 mt-4">
+                <ol className="flex flex-col gap-4">
                   {response.steps.map((step, i) => (
                     <li key={i} className="flex gap-3 text-sm">
-                      <span className="shrink-0 w-5 h-5 rounded-full bg-primary/10 text-primary text-[10px] font-bold flex items-center justify-center mt-0.5">
+                      <span
+                        className={`shrink-0 w-6 h-6 rounded-full text-[11px] font-bold flex items-center justify-center mt-0.5 ${stepCircleClass(i)}`}
+                      >
                         {i + 1}
                       </span>
                       <span className="text-foreground/80 leading-relaxed">{step}</span>
                     </li>
                   ))}
                 </ol>
-              </section>
+              </TabsContent>
 
-              {/* Substitutions */}
-              {response.substitutions.length > 0 && (
-                <section>
-                  <h4 className="text-xs font-semibold tracking-widest uppercase text-muted-foreground mb-3">
-                    Substitutions
-                  </h4>
-                  <ul className="flex flex-col gap-2">
+              <TabsContent value="subs" className="px-6 pb-2 mt-4">
+                {response.substitutions.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-8">
+                    No substitutions needed.
+                  </p>
+                ) : (
+                  <ul className="flex flex-col gap-3">
                     {response.substitutions.map((s, i) => (
                       <li key={i} className="text-sm text-muted-foreground">
                         <span className="font-medium text-foreground">{s.ingredient}</span>
@@ -175,33 +213,12 @@ export function RecipeModal({
                       </li>
                     ))}
                   </ul>
-                </section>
-              )}
-            </div>
+                )}
+              </TabsContent>
+            </Tabs>
 
-            {/* Footer */}
-            <div className="px-6 pb-6 flex flex-col gap-3 border-t border-border pt-4">
-              {isSignedIn ? (
-                <Button
-                  onClick={handleSave}
-                  disabled={saving || saved}
-                  variant={saved ? "secondary" : "outline"}
-                  className="w-full"
-                >
-                  {saved ? "✓ Saved to favourites" : saving ? "Saving..." : "Save to favourites"}
-                </Button>
-              ) : (
-                <p className="text-sm text-muted-foreground text-center">
-                  <a
-                    href="/handler/sign-in"
-                    className="text-primary hover:underline font-medium"
-                  >
-                    Sign in
-                  </a>{" "}
-                  to save recipes to your favourites
-                </p>
-              )}
-            </div>
+            {/* Footer — keyed by recipeId so save state resets on new recipe */}
+            <SaveFooter key={recipeId ?? 0} recipeId={recipeId} recipeTitle={recipeTitle} isSignedIn={isSignedIn} />
           </>
         ) : null}
       </DialogContent>

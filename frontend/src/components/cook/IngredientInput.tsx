@@ -3,6 +3,13 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 
+export type Quantity = "1 qty" | "a little" | "plenty"
+
+export interface IngredientWithQty {
+  name: string
+  qty: Quantity
+}
+
 export interface Filters {
   vegetarian: boolean
   vegan: boolean
@@ -10,12 +17,16 @@ export interface Filters {
 }
 
 interface Props {
-  ingredients: string[]
+  ingredients: IngredientWithQty[]
   filters: Filters
   loading: boolean
+  cuisine: string
+  defaultTab?: "text" | "photo"
   onAddIngredient: (name: string) => void
   onRemoveIngredient: (name: string) => void
+  onUpdateQty: (name: string, qty: Quantity) => void
   onToggleFilter: (key: keyof Filters) => void
+  onCuisineChange: (val: string) => void
   onPhotoIngredients: (names: string[]) => void
   onSubmit: () => void
 }
@@ -28,17 +39,34 @@ const FILTER_LABELS: { key: keyof Filters; label: string }[] = [
   { key: "gluten_free", label: "Gluten-Free" },
 ]
 
+const CUISINE_OPTIONS = [
+  "Any",
+  "Italian",
+  "Asian",
+  "Mexican",
+  "Indian",
+  "Mediterranean",
+  "American",
+  "French",
+]
+
+const QTY_OPTIONS: Quantity[] = ["1 qty", "a little", "plenty"]
+
 export function IngredientInput({
   ingredients,
   filters,
   loading,
+  cuisine,
+  defaultTab = "text",
   onAddIngredient,
   onRemoveIngredient,
+  onUpdateQty,
   onToggleFilter,
+  onCuisineChange,
   onPhotoIngredients,
   onSubmit,
 }: Props) {
-  const [tab, setTab] = useState<TabId>("text")
+  const [tab, setTab] = useState<TabId>(defaultTab)
   const [inputVal, setInputVal] = useState("")
   const [photoLoading, setPhotoLoading] = useState(false)
   const [photoError, setPhotoError] = useState<string | null>(null)
@@ -46,7 +74,7 @@ export function IngredientInput({
 
   const commitInput = () => {
     const name = inputVal.trim().toLowerCase()
-    if (name && !ingredients.includes(name)) {
+    if (name && !ingredients.some((i) => i.name === name)) {
       onAddIngredient(name)
     }
     setInputVal("")
@@ -97,6 +125,8 @@ export function IngredientInput({
     }
   }
 
+  const isReady = ingredients.length >= 3
+
   return (
     <div className="flex flex-col gap-6">
       {/* Method tabs */}
@@ -130,7 +160,7 @@ export function IngredientInput({
       {tab === "text" ? (
         <div className="flex gap-2">
           <Input
-            placeholder="What else do you have?"
+            placeholder="Type an ingredient..."
             value={inputVal}
             onChange={(e) => setInputVal(e.target.value)}
             onKeyDown={handleKeyDown}
@@ -176,23 +206,45 @@ export function IngredientInput({
         <div className="rounded-xl border border-border p-4 flex flex-col gap-3">
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium tracking-widest uppercase text-muted-foreground">
-              Your Ingredients
+              Added · {ingredients.length}
             </span>
-            <span className="text-xs font-medium text-primary">
-              {ingredients.length} added
-            </span>
+            {isReady && (
+              <span className="flex items-center gap-1.5 text-xs font-medium text-green-700">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" />
+                Ready
+              </span>
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
-            {ingredients.map((name) => (
+            {ingredients.map(({ name, qty }) => (
               <span
                 key={name}
-                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-border bg-secondary text-sm text-foreground"
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-border bg-secondary text-sm text-foreground"
               >
-                {name}
+                <span className="font-medium">{name}</span>
+                <span className="flex items-center gap-0.5 ml-1">
+                  {QTY_OPTIONS.map((q) => (
+                    <button
+                      key={q}
+                      type="button"
+                      onClick={() => onUpdateQty(name, q)}
+                      className={[
+                        "px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors",
+                        qty === q
+                          ? "bg-primary/10 text-primary"
+                          : "text-muted-foreground hover:text-foreground",
+                      ].join(" ")}
+                      aria-pressed={qty === q}
+                      aria-label={`Set ${name} to ${q}`}
+                    >
+                      {q}
+                    </button>
+                  ))}
+                </span>
                 <button
                   type="button"
                   onClick={() => onRemoveIngredient(name)}
-                  className="text-muted-foreground hover:text-foreground transition-colors leading-none"
+                  className="ml-1 text-muted-foreground hover:text-foreground transition-colors leading-none"
                   aria-label={`Remove ${name}`}
                 >
                   ×
@@ -200,13 +252,16 @@ export function IngredientInput({
               </span>
             ))}
           </div>
+          <p className="text-xs text-muted-foreground italic">
+            Tap any chip to adjust quantity. 'One serving' means whatever that is to you.
+          </p>
         </div>
       )}
 
-      {/* Filters */}
+      {/* Dietary filters */}
       <div className="flex flex-col gap-2">
         <span className="text-xs font-medium tracking-widest uppercase text-muted-foreground">
-          Filters
+          Dietary Filters
         </span>
         <div className="flex flex-wrap gap-2">
           {FILTER_LABELS.map(({ key, label }) => (
@@ -227,19 +282,47 @@ export function IngredientInput({
         </div>
       </div>
 
+      {/* Cuisine preference */}
+      <div className="flex flex-col gap-2">
+        <span className="text-xs font-medium tracking-widest uppercase text-muted-foreground">
+          Cuisine Preference
+        </span>
+        <div className="relative">
+          <select
+            value={cuisine}
+            onChange={(e) => onCuisineChange(e.target.value)}
+            className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-background text-foreground appearance-none cursor-pointer focus:outline-none focus:ring-1 focus:ring-primary"
+          >
+            {CUISINE_OPTIONS.map((opt) => (
+              <option key={opt} value={opt === "Any" ? "" : opt}>
+                {opt}
+              </option>
+            ))}
+          </select>
+          <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground text-xs">
+            ▼
+          </span>
+        </div>
+      </div>
+
       {/* CTA */}
-      <Button
-        onClick={onSubmit}
-        disabled={ingredients.length === 0 || loading}
-        className="w-full py-4 text-base bg-primary text-primary-foreground hover:bg-primary/90 h-auto rounded-xl"
-      >
-        {loading ? "Finding recipes..." : "Find my recipes →"}
-      </Button>
+      <div className="flex flex-col gap-1">
+        <Button
+          onClick={onSubmit}
+          disabled={ingredients.length === 0 || loading}
+          className="w-full py-4 text-base bg-primary text-primary-foreground hover:bg-primary/90 h-auto rounded-xl"
+        >
+          {loading ? "Finding recipes..." : "Find Recipes →"}
+        </Button>
+        <p className="text-center text-xs text-muted-foreground">
+          Searching 1.94M recipes
+        </p>
+      </div>
     </div>
   )
 }
 
-// Compact badge used in ShortlistView
+// Compact badge used across cook flow, history, favourites
 export function ThemeBadge({ theme }: { theme: string | null }) {
   if (!theme) return null
   const styles: Record<string, string> = {

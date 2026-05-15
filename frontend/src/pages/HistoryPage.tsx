@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ThemeBadge } from "@/components/cook/IngredientInput";
 import { fetchHistory, deleteHistoryEntry, addFavourite, type HistoryEntry } from "@/lib/api";
 
 type Filter = "all" | "week" | "month";
@@ -14,43 +15,48 @@ function tagForEntry(entry: HistoryEntry): string {
   return "Filling";
 }
 
-function formatDate(iso: string): string {
+function formatRelativeDate(iso: string): string {
+  const diffDays = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(new Date(iso));
 }
 
 interface HistoryRowProps {
   entry: HistoryEntry;
+  isSaved: boolean;
   onSave: (entry: HistoryEntry) => void;
   onDelete: (id: string) => void;
 }
 
-function HistoryRow({ entry, onSave, onDelete }: HistoryRowProps) {
+function HistoryRow({ entry, isSaved, onSave, onDelete }: HistoryRowProps) {
   const tag = tagForEntry(entry);
   return (
     <div className="flex items-center justify-between gap-3 py-4 border-b border-border last:border-0">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-medium text-foreground truncate">{entry.recipe_name}</span>
-          <span
-            className="shrink-0 text-xs px-2 py-0.5 rounded-full border"
-            style={{ color: "var(--color-primary)", borderColor: "var(--color-primary)" }}
-          >
-            {tag}
-          </span>
+          <ThemeBadge theme={tag} />
         </div>
-        <p className="text-sm text-muted-foreground mt-0.5">{formatDate(entry.cooked_at)}</p>
+        <p className="text-sm text-muted-foreground mt-0.5">{formatRelativeDate(entry.cooked_at)}</p>
       </div>
       <div className="flex items-center gap-3 shrink-0">
-        <Link to={`/?recipe=${entry.recipe_id}`} className="text-sm font-medium text-primary hover:underline">
+        <Link to="/cook" className="text-sm font-medium text-primary hover:underline">
           Cook again →
         </Link>
         <button
           type="button"
           onClick={() => onSave(entry)}
-          className="text-sm text-muted-foreground hover:text-primary transition-colors"
-          title="Save to favourites"
+          disabled={isSaved}
+          className={[
+            "text-sm transition-colors",
+            isSaved
+              ? "text-green-700 font-medium cursor-default"
+              : "text-muted-foreground hover:text-primary",
+          ].join(" ")}
+          title={isSaved ? "Saved" : "Save to favourites"}
         >
-          ♡ Save
+          {isSaved ? "✓ Saved" : "♡ Save"}
         </button>
         <button
           type="button"
@@ -69,23 +75,35 @@ export default function HistoryPage() {
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
-  const [loading, setLoading] = useState(true);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const [savedIds, setSavedIds] = useState<Set<string>>(new Set());
+
+  const currentKey = `${search}:${filter}`;
 
   useEffect(() => {
-    setLoading(true);
+    let cancelled = false;
     fetchHistory({ search: search || undefined, filter })
-      .then((data) => setEntries(data.entries))
-      .catch(console.error)
-      .finally(() => setLoading(false));
+      .then((data) => {
+        if (!cancelled) {
+          setEntries(data.entries);
+          setLoadedKey(`${search}:${filter}`);
+        }
+      })
+      .catch(console.error);
+    return () => { cancelled = true; };
   }, [search, filter]);
+
+  const loading = loadedKey !== currentKey;
 
   async function handleDelete(id: string) {
     await deleteHistoryEntry(id);
     setEntries((prev) => prev.filter((e) => e.id !== id));
+    setSavedIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
   }
 
   async function handleSave(entry: HistoryEntry) {
     await addFavourite(entry.recipe_id, entry.recipe_name);
+    setSavedIds((prev) => new Set(prev).add(entry.id));
   }
 
   const filterLabels: { key: Filter; label: string }[] = [
@@ -96,12 +114,20 @@ export default function HistoryPage() {
 
   return (
     <div className="min-h-screen bg-background">
-      <div className="max-w-2xl mx-auto px-4 py-12">
-        <div className="flex items-center justify-between mb-8">
-          <h1 className="text-2xl font-semibold text-foreground">History</h1>
-          <Link to="/" className="text-sm text-muted-foreground hover:text-foreground">← Back</Link>
+      {/* Nav */}
+      <header className="sticky top-0 z-40 border-b border-border bg-background/95 backdrop-blur-sm">
+        <div className="max-w-2xl mx-auto px-4 h-14 flex items-center justify-between">
+          <Link to="/" className="font-serif text-lg font-light text-foreground tracking-tight">
+            StruggleMeals
+          </Link>
+          <span className="text-sm font-medium text-foreground">History</span>
+          <Link to="/cook" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+            ← Cook
+          </Link>
         </div>
+      </header>
 
+      <div className="max-w-2xl mx-auto px-4 py-8">
         <Input
           placeholder="Search history..."
           value={search}
@@ -135,7 +161,13 @@ export default function HistoryPage() {
         ) : (
           <div>
             {entries.map((entry) => (
-              <HistoryRow key={entry.id} entry={entry} onSave={handleSave} onDelete={handleDelete} />
+              <HistoryRow
+                key={entry.id}
+                entry={entry}
+                isSaved={savedIds.has(entry.id)}
+                onSave={handleSave}
+                onDelete={handleDelete}
+              />
             ))}
           </div>
         )}
