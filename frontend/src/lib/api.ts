@@ -128,11 +128,18 @@ export interface ShortlistResponse {
   groq_used: boolean;
 }
 
+export interface IngredientWithQtyRequest {
+  name: string;
+  qty: "1 qty" | "a little" | "plenty";
+}
+
 export interface ShortlistRequest {
   ingredients: string[];
+  ingredients_with_qty?: IngredientWithQtyRequest[];
   vegetarian?: boolean;
   vegan?: boolean;
   gluten_free?: boolean;
+  cuisine?: string;
 }
 
 export async function fetchShortlist(payload: ShortlistRequest): Promise<ShortlistResponse> {

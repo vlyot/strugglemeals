@@ -136,12 +136,18 @@ Substitutions: all missing ingredients (have=false). `have` flags are cross-veri
 _Depends on Phase 2 (dataset query), Phase 3 (auth), and Phase 4 (AI integrations). Ties them together into the full user flow._
 
 **Backend — `POST /ai/theme-shortlist`** (new endpoint):
-- Accepts `{ ingredients[], vegetarian?, vegan?, gluten_free? }`
-- Queries SQLite with dietary filters, scores up to 2000 candidates by ingredient overlap (same `score()` logic as Phase 2)
-- Passes top 20 candidates (by match_score) to Groq `llama-3.3-70b-versatile` with `response_format: json_object`
-- Groq picks up to 2 recipes per theme (Light/Filling/Quick) with a one-sentence reason
+- Accepts `{ ingredients[], ingredients_with_qty?: [{name, qty}][], vegetarian?, vegan?, gluten_free?, cuisine? }`
+- **Candidate selection:** SQLite `json_each()` EXISTS clauses filter to only recipes containing at least one user ingredient (LIMIT 500) — replaces unfiltered LIMIT 2000
+- **Scoring (TF-IDF / BM25-inspired):** each candidate scored as `(Σ idf(ingredient) × qty_weight(qty) + title_bonus) × coverage_ratio^1.5 × missing_penalty`
+  - IDF tiers: ultra-common (chicken, onion…) → 2.0; common (egg, cheese…) → 4.5; specific/niche (udon, kimchi…) → 9.0
+  - Qty weights: "plenty" → 1.3×, "1 qty" → 1.0×, "a little" → 0.7×
+  - Title bonus: +5.0 if ingredient appears in recipe title
+  - Coverage penalty: (matched/total)^1.5 — penalises low-coverage matches
+  - Missing penalty: 1 − (missing_ratio² × 0.5) — soft drag for many unfilled ingredients
+- Passes top 20 ranked candidates to Groq `llama-3.3-70b-versatile` with step count + first-step excerpt per candidate
+- Groq picks up to 2 recipes per theme (Light/Filling/Quick) — uses step wording to judge Quick vs Filling accurately
 - Returns `{ results: ShortlistEntry[], groq_used: bool }` — falls back to raw top-6 if Groq fails (always 200)
-- Theme rules: Quick = under 20 min or ≤5 core ingredients; Light = salads/soups/eggs/fish; Filling = everything else
+- SQLite WAL mode + 64MB page cache applied at startup via PRAGMAs
 
 **Backend — existing endpoints reused as-is:**
 - `GET /recipes/:id` — fetch full recipe detail for modal
@@ -161,7 +167,7 @@ _Depends on Phase 2 (dataset query), Phase 3 (auth), and Phase 4 (AI integration
 - Neon Auth `trusted_origins` updated to include `strugglemeals.vercel.app`
 - Vercel `vercel.json` SPA rewrite rule added (`/(.*) → /index.html`) for client-side routing
 
-**Quantity classification:** Deferred to Phase 7. MVP uses plain ingredient names; scoring works correctly without quantities.
+**Quantity classification:** Implemented in Phase 7. `ingredients_with_qty` sent from frontend, used as IDF multipliers in scoring.
 
 **Status: COMPLETE** — full flow live at `https://strugglemeals.vercel.app/cook`
 
@@ -188,6 +194,16 @@ _Depends on Phase 2 (dataset query), Phase 3 (auth), and Phase 4 (AI integration
 
 _Depends on Phase 6. Final phase before real-world validation._
 
+**Completed:**
+- Recipe matching algorithm replaced with TF-IDF / BM25-inspired scorer (`score_v2`):
+  - IDF rarity tiers + quantity weight multipliers + title match bonus + coverage/missing penalties
+  - SQL candidate filter changed from unfiltered LIMIT 2000 → `json_each()` EXISTS clauses (finds relevant recipes rather than first 2000 rows by insertion order)
+  - Groq now receives step count + first-step excerpt per candidate for better Quick/Filling classification
+  - `ingredients_with_qty` passed from frontend to backend
+  - SQLite WAL mode + 64MB page cache via startup PRAGMAs
+- 12 unit tests covering all scoring functions (`score_v2`, `rarity_idf`, `qty_weight`, `resolve_user_ings`, etc.)
+
+**Remaining:**
 - End-to-end testing of the full happy path and key error paths
 - Performance check — ingredient query response time acceptable, no obvious bottlenecks
 - Basic accessibility pass

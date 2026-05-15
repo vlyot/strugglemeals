@@ -45,7 +45,17 @@ async fn main() {
             .build(manager)
             .expect("Failed to open SQLite pool"),
     );
-    tracing::info!("SQLite ready");
+    // Apply performance pragmas once at startup
+    {
+        let conn = sqlite.get().expect("Failed to get SQLite connection for pragmas");
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA cache_size=-65536;",
+        )
+        .expect("Failed to apply SQLite pragmas");
+        tracing::info!("SQLite pragmas applied (WAL, 64MB cache)");
+    }
 
     let http = reqwest::Client::new();
 

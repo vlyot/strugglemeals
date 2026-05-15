@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { Fragment, useState } from "react"
 import {
   fetchShortlist,
   fetchRecipeDetail,
@@ -7,29 +7,39 @@ import {
   type ShortlistEntry,
   type PresentResponse,
 } from "@/lib/api"
-import { IngredientInput, type Filters } from "@/components/cook/IngredientInput"
+import {
+  IngredientInput,
+  type Filters,
+  type IngredientWithQty,
+  type Quantity,
+} from "@/components/cook/IngredientInput"
+import { MethodSelector } from "@/components/cook/MethodSelector"
 import { ShortlistView } from "@/components/cook/ShortlistView"
 import { RecipeModal } from "@/components/cook/RecipeModal"
+import { AuthNudgeBanner } from "@/components/sections/results"
 import { Link } from "react-router-dom"
 import { authClient } from "@/stack/client"
 
-type Step = "input" | "shortlist"
+type Step = "method" | "input" | "shortlist"
 
 export default function CookPage() {
   const { data: session } = authClient.useSession()
 
   // Ingredient state
-  const [ingredients, setIngredients] = useState<string[]>([])
+  const [ingredients, setIngredients] = useState<IngredientWithQty[]>([])
   const [filters, setFilters] = useState<Filters>({
     vegetarian: false,
     vegan: false,
     gluten_free: false,
   })
+  const [cuisine, setCuisine] = useState("")
 
   // Flow state
-  const [step, setStep] = useState<Step>("input")
+  const [step, setStep] = useState<Step>("method")
+  const [defaultTab, setDefaultTab] = useState<"text" | "photo">("text")
   const [shortlistLoading, setShortlistLoading] = useState(false)
   const [shortlistResults, setShortlistResults] = useState<ShortlistEntry[]>([])
+  const [inputError, setInputError] = useState<string | null>(null)
 
   // Modal state
   const [modalOpen, setModalOpen] = useState(false)
@@ -40,12 +50,23 @@ export default function CookPage() {
   const [modalLoading, setModalLoading] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
 
+  const handleMethodSelect = (method: "text" | "photo") => {
+    setDefaultTab(method)
+    setStep("input")
+  }
+
   const addIngredient = (name: string) => {
-    setIngredients((prev) => (prev.includes(name) ? prev : [...prev, name]))
+    setIngredients((prev) =>
+      prev.some((i) => i.name === name) ? prev : [...prev, { name, qty: "1 qty" as Quantity }]
+    )
   }
 
   const removeIngredient = (name: string) => {
-    setIngredients((prev) => prev.filter((i) => i !== name))
+    setIngredients((prev) => prev.filter((i) => i.name !== name))
+  }
+
+  const updateIngredientQty = (name: string, qty: Quantity) => {
+    setIngredients((prev) => prev.map((i) => (i.name === name ? { ...i, qty } : i)))
   }
 
   const toggleFilter = (key: keyof Filters) => {
@@ -56,7 +77,9 @@ export default function CookPage() {
     setIngredients((prev) => {
       const merged = [...prev]
       for (const n of names) {
-        if (!merged.includes(n)) merged.push(n)
+        if (!merged.some((i) => i.name === n)) {
+          merged.push({ name: n, qty: "1 qty" as Quantity })
+        }
       }
       return merged
     })
@@ -64,19 +87,22 @@ export default function CookPage() {
 
   const handleFindRecipes = async () => {
     if (ingredients.length === 0) return
+    setInputError(null)
     setShortlistLoading(true)
     try {
       const data = await fetchShortlist({
-        ingredients,
+        ingredients: ingredients.map((i) => i.name),
+        ingredients_with_qty: ingredients.map((i) => ({ name: i.name, qty: i.qty })),
         vegetarian: filters.vegetarian || undefined,
         vegan: filters.vegan || undefined,
         gluten_free: filters.gluten_free || undefined,
+        cuisine: cuisine || undefined,
       })
       setShortlistResults(data.results)
       setStep("shortlist")
     } catch (e) {
       console.error("fetchShortlist error:", e)
-      // Stay on input step; ideally show a toast — for now just log
+      setInputError("Something went wrong finding recipes. Please try again.")
     } finally {
       setShortlistLoading(false)
     }
@@ -93,17 +119,14 @@ export default function CookPage() {
 
     try {
       const detail = await fetchRecipeDetail(entry.id)
-      const presented = await presentRecipe(detail, ingredients)
+      const presented = await presentRecipe(detail, ingredients.map((i) => i.name))
       setModalResponse(presented)
 
-      // Fire-and-forget history record for signed-in users
       if (session?.user) {
         recordCookSilent(entry.id, entry.title)
       }
     } catch (e) {
-      setModalError(
-        "Couldn't prepare this recipe right now. Please try again.",
-      )
+      setModalError("Couldn't prepare this recipe right now. Please try again.")
       console.error("presentRecipe error:", e)
     } finally {
       setModalLoading(false)
@@ -160,37 +183,76 @@ export default function CookPage() {
 
       {/* Main */}
       <main className="max-w-lg mx-auto px-4 py-8">
-        {step === "input" && (
+        {step === "method" && (
           <div className="flex flex-col gap-6">
             <div>
-              <h1 className="font-serif text-3xl font-light text-foreground">
-                What's in your kitchen?
-              </h1>
-              <p className="text-muted-foreground text-sm mt-1">
-                Add your ingredients and we'll find the best recipes.
+              <p className="text-xs font-medium tracking-widest uppercase text-muted-foreground mb-1">
+                Step 1 of 2
               </p>
+              <h1 className="font-serif text-3xl font-light text-foreground">
+                How do you want to add ingredients?
+              </h1>
             </div>
+            <MethodSelector onSelect={handleMethodSelect} />
+          </div>
+        )}
+
+        {step === "input" && (
+          <div className="flex flex-col gap-6">
+            {/* Step indicator */}
+            <div className="flex items-center gap-2">
+              {(["01", "02", "03"] as const).map((label, i) => (
+                <Fragment key={label}>
+                  {i > 0 && <div className="flex-1 h-px bg-border" />}
+                  <div
+                    className={[
+                      "w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold shrink-0",
+                      i === 1
+                        ? "bg-primary text-primary-foreground"
+                        : "border border-border text-muted-foreground",
+                    ].join(" ")}
+                  >
+                    {label}
+                  </div>
+                </Fragment>
+              ))}
+            </div>
+
             <IngredientInput
               ingredients={ingredients}
               filters={filters}
               loading={shortlistLoading}
+              cuisine={cuisine}
+              defaultTab={defaultTab}
               onAddIngredient={addIngredient}
               onRemoveIngredient={removeIngredient}
+              onUpdateQty={updateIngredientQty}
               onToggleFilter={toggleFilter}
+              onCuisineChange={setCuisine}
               onPhotoIngredients={handlePhotoIngredients}
               onSubmit={handleFindRecipes}
             />
+
+            {inputError && (
+              <p className="text-sm text-destructive text-center">{inputError}</p>
+            )}
           </div>
         )}
 
         {step === "shortlist" && (
-          <ShortlistView
-            results={shortlistResults}
-            loading={shortlistLoading}
-            presenting={presenting}
-            onBack={handleBack}
-            onCook={handleCook}
-          />
+          <div className="flex flex-col gap-4">
+            <ShortlistView
+              results={shortlistResults}
+              loading={shortlistLoading}
+              presenting={presenting}
+              userIngredients={ingredients.map((i) => i.name)}
+              onBack={handleBack}
+              onCook={handleCook}
+            />
+            <div className="flex justify-center pt-2">
+              <AuthNudgeBanner />
+            </div>
+          </div>
         )}
       </main>
 

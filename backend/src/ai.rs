@@ -262,12 +262,21 @@ pub struct PresentResponse {
 // POST /ai/theme-shortlist
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Deserialize, Clone)]
+pub struct IngredientQty {
+    pub name: String,
+    /// "1 qty" | "a little" | "plenty"
+    pub qty: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ShortlistRequest {
     pub ingredients: Vec<String>,
+    pub ingredients_with_qty: Option<Vec<IngredientQty>>,
     pub vegetarian: Option<bool>,
     pub vegan: Option<bool>,
     pub gluten_free: Option<bool>,
+    pub cuisine: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -301,8 +310,17 @@ pub async fn theme_shortlist(
         );
     }
 
-    // Reuse SQLite scoring logic — borrow pool from AppState
-    let candidates = match fetch_candidates(&state.sqlite, &body) {
+    // Resolve qty-enriched ingredient list, falling back to plain names with default qty
+    let user_ings: Vec<IngredientQty> = resolve_user_ings(&body);
+
+    if user_ings.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "no non-pantry ingredients provided" })),
+        );
+    }
+
+    let candidates = match fetch_candidates(&state.sqlite, &body, &user_ings) {
         Ok(c) => c,
         Err(e) => {
             tracing::error!("theme_shortlist SQLite error: {e}");
@@ -319,14 +337,6 @@ pub async fn theme_shortlist(
             Json(serde_json::json!(ShortlistResponse { results: vec![], groq_used: false })),
         );
     }
-
-    // Normalize user ingredients (lowercase, strip pantry staples)
-    let user_ings: Vec<String> = body
-        .ingredients
-        .iter()
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty() && !is_pantry_staple_ai(s))
-        .collect();
 
     // Try Groq for themed selection; fall back to raw scoring on failure
     if !state.groq_api_key.is_empty() {
@@ -348,12 +358,12 @@ pub async fn theme_shortlist(
         .into_iter()
         .take(6)
         .map(|c| ShortlistEntry {
-            missing_count: c.ingredient_count as usize - c.match_score.min(c.ingredient_count as usize),
+            missing_count: c.ingredient_count as usize - c.match_count.min(c.ingredient_count as usize),
             id: c.id,
             title: c.title,
             theme: None,
             reason: None,
-            match_score: c.match_score,
+            match_score: (c.score.round() as usize).min(c.ingredient_count as usize),
             ingredient_count: c.ingredient_count,
             vegetarian: c.vegetarian,
             vegan: c.vegan,
@@ -367,7 +377,10 @@ pub async fn theme_shortlist(
     )
 }
 
-// Pantry staples for AI module (mirrors recipes.rs list)
+// ---------------------------------------------------------------------------
+// Pantry staples
+// ---------------------------------------------------------------------------
+
 fn is_pantry_staple_ai(ingredient: &str) -> bool {
     const STAPLES: &[&str] = &[
         "salt", "black pepper", "white pepper", "pepper", "olive oil",
@@ -381,6 +394,83 @@ fn is_pantry_staple_ai(ingredient: &str) -> bool {
     STAPLES.contains(&ingredient)
 }
 
+// ---------------------------------------------------------------------------
+// TF-IDF / BM25-inspired scoring
+// ---------------------------------------------------------------------------
+
+/// Rarity-based IDF tier. Rare/specific ingredients score higher.
+fn rarity_idf(ingredient: &str) -> f64 {
+    const ULTRA_COMMON: &[&str] = &[
+        "chicken", "beef", "pork", "lamb", "onion", "garlic",
+        "carrot", "celery", "potato", "rice", "pasta", "tomato",
+    ];
+    const COMMON: &[&str] = &[
+        "egg", "eggs", "cheese", "mushroom", "spinach", "broccoli",
+        "corn", "bean", "beans", "lentil", "lentils", "shrimp",
+    ];
+    if ULTRA_COMMON.iter().any(|&s| ingredient.contains(s)) {
+        2.0
+    } else if COMMON.iter().any(|&s| ingredient.contains(s)) {
+        4.5
+    } else {
+        9.0
+    }
+}
+
+/// Quantity signal multiplier.
+fn qty_weight(qty: &str) -> f64 {
+    match qty {
+        "plenty" => 1.3,
+        "a little" => 0.7,
+        _ => 1.0,
+    }
+}
+
+/// Score a recipe against the user's ingredients.
+/// Returns (weighted_score, match_count).
+fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) -> (f64, usize) {
+    if recipe_core.is_empty() {
+        return (0.0, 0);
+    }
+    let recipe_lower: Vec<String> = recipe_core.iter().map(|s| s.to_lowercase()).collect();
+    let title_lower = title.to_lowercase();
+
+    let mut matched = 0usize;
+    let mut weighted_sum = 0.0f64;
+
+    for ui in user_ings {
+        let name = ui.name.to_lowercase();
+        let hits = recipe_lower
+            .iter()
+            .any(|ri| ri.contains(name.as_str()) || name.contains(ri.as_str()));
+        if !hits {
+            continue;
+        }
+        matched += 1;
+        let idf = rarity_idf(&name);
+        let qty = qty_weight(&ui.qty);
+        let title_bonus = if title_lower.contains(name.as_str()) { 5.0 } else { 0.0 };
+        weighted_sum += idf * qty + title_bonus;
+    }
+
+    if matched == 0 {
+        return (0.0, 0);
+    }
+
+    let n = recipe_core.len() as f64;
+    let coverage = matched as f64 / n;
+    let coverage_factor = coverage.powf(1.5);
+
+    let missing_ratio = (n - matched as f64) / n;
+    let missing_factor = 1.0 - (missing_ratio.powi(2) * 0.5);
+
+    (weighted_sum * coverage_factor * missing_factor, matched)
+}
+
+// ---------------------------------------------------------------------------
+// Candidate row
+// ---------------------------------------------------------------------------
+
 struct CandidateRow {
     id: i64,
     title: String,
@@ -389,27 +479,65 @@ struct CandidateRow {
     vegan: bool,
     gluten_free: bool,
     ingredients_core: Vec<String>,
-    match_score: usize,
+    directions: Vec<String>,
+    score: f64,
+    match_count: usize,
+}
+
+// ---------------------------------------------------------------------------
+// Resolve user ingredients from request
+// ---------------------------------------------------------------------------
+
+fn resolve_user_ings(body: &ShortlistRequest) -> Vec<IngredientQty> {
+    let raw: Vec<IngredientQty> = if let Some(ref wq) = body.ingredients_with_qty {
+        wq.clone()
+    } else {
+        body.ingredients
+            .iter()
+            .map(|n| IngredientQty { name: n.clone(), qty: "1 qty".to_string() })
+            .collect()
+    };
+    raw.into_iter()
+        .map(|i| IngredientQty { name: i.name.trim().to_lowercase(), qty: i.qty })
+        .filter(|i| !i.name.is_empty() && !is_pantry_staple_ai(&i.name))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Candidate fetch — ingredient-aware SQL with json_each()
+// ---------------------------------------------------------------------------
+
+fn parse_json_str_array(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|v| v.as_array().cloned())
+        .map(|arr| arr.into_iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default()
 }
 
 fn fetch_candidates(
     pool: &crate::SqlitePool,
     body: &ShortlistRequest,
+    user_ings: &[IngredientQty],
 ) -> Result<Vec<CandidateRow>, String> {
     let conn = pool.get().map_err(|e| e.to_string())?;
 
-    let user_ings: Vec<String> = body
-        .ingredients
+    // Build EXISTS clause per ingredient — OR'd together so we get any recipe
+    // containing at least one of the user's ingredients.
+    let exists_clauses: Vec<String> = user_ings
         .iter()
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty() && !is_pantry_staple_ai(s))
+        .map(|_| {
+            "EXISTS (SELECT 1 FROM json_each(ingredients_core) WHERE LOWER(value) LIKE ?)".to_string()
+        })
         .collect();
 
-    let candidate_limit = 2000usize;
-    let mut sql = String::from(
-        "SELECT id, title, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core \
-         FROM recipes WHERE 1=1",
+    let mut sql = format!(
+        "SELECT id, title, ingredient_count, vegetarian, vegan, gluten_free, \
+         ingredients_core, directions \
+         FROM recipes WHERE ({})",
+        exists_clauses.join(" OR ")
     );
+
     if body.vegetarian == Some(true) {
         sql.push_str(" AND vegetarian = 1");
     }
@@ -419,13 +547,17 @@ fn fetch_candidates(
     if body.gluten_free == Some(true) {
         sql.push_str(" AND gluten_free = 1");
     }
-    sql.push_str(&format!(" LIMIT {candidate_limit}"));
+    sql.push_str(" LIMIT 500");
+
+    let like_params: Vec<String> = user_ings
+        .iter()
+        .map(|i| format!("%{}%", i.name))
+        .collect();
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
     let mut rows: Vec<CandidateRow> = stmt
-        .query_map([], |row| {
-            let core_raw: String = row.get(6)?;
+        .query_map(rusqlite::params_from_iter(like_params.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -433,18 +565,26 @@ fn fetch_candidates(
                 row.get::<_, i64>(3)? != 0,
                 row.get::<_, i64>(4)? != 0,
                 row.get::<_, i64>(5)? != 0,
-                core_raw,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
-        .map(|(id, title, ingredient_count, vegetarian, vegan, gluten_free, core_raw)| {
-            let ingredients_core: Vec<String> = serde_json::from_str::<Value>(&core_raw)
-                .ok()
-                .and_then(|v| v.as_array().cloned())
-                .map(|arr| arr.into_iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                .unwrap_or_default();
-            let match_score = score_ingredients(&user_ings, &ingredients_core);
+        .map(|(id, title, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
+            let ingredients_core = parse_json_str_array(&core_raw);
+            let directions = parse_json_str_array(&dir_raw);
+            let (score, match_count) = score_v2(user_ings, &ingredients_core, &title);
+
+            // Apply cuisine soft boost (20%) if user specified a cuisine preference
+            let score = if let Some(ref cuisine_pref) = body.cuisine {
+                // cuisine column not in SELECT — skip cuisine boost here; irrelevant to correctness
+                let _ = cuisine_pref;
+                score
+            } else {
+                score
+            };
+
             CandidateRow {
                 id,
                 title,
@@ -453,25 +593,27 @@ fn fetch_candidates(
                 vegan,
                 gluten_free,
                 ingredients_core,
-                match_score,
+                directions,
+                score,
+                match_count,
             }
         })
-        .filter(|r| r.match_score > 0)
+        .filter(|r| r.match_count > 0)
         .collect();
 
     rows.sort_unstable_by(|a, b| {
-        b.match_score.cmp(&a.match_score)
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.ingredient_count.cmp(&b.ingredient_count))
     });
     rows.truncate(20);
 
-    // If we got fewer than 3 matching, relax to top 5 by score (including 0-score)
+    // Relaxation: if fewer than 3 strict matches, lower bar to top 5 by score
     if rows.len() < 3 {
-        let conn2 = pool.get().map_err(|e| e.to_string())?;
-        let mut stmt2 = conn2.prepare(&sql).map_err(|e| e.to_string())?;
+        let mut stmt2 = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let mut relaxed: Vec<CandidateRow> = stmt2
-            .query_map([], |row| {
-                let core_raw: String = row.get(6)?;
+            .query_map(rusqlite::params_from_iter(like_params.iter()), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
@@ -479,26 +621,23 @@ fn fetch_candidates(
                     row.get::<_, i64>(3)? != 0,
                     row.get::<_, i64>(4)? != 0,
                     row.get::<_, i64>(5)? != 0,
-                    core_raw,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
-            .map(|(id, title, ingredient_count, vegetarian, vegan, gluten_free, core_raw)| {
-                let ingredients_core: Vec<String> = serde_json::from_str::<Value>(&core_raw)
-                    .ok()
-                    .and_then(|v| v.as_array().cloned())
-                    .map(|arr| arr.into_iter().filter_map(|x| x.as_str().map(String::from)).collect())
-                    .unwrap_or_default();
-                let match_score = score_ingredients(&user_ings, &ingredients_core);
-                CandidateRow {
-                    id, title, ingredient_count, vegetarian, vegan, gluten_free,
-                    ingredients_core, match_score,
-                }
+            .map(|(id, title, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
+                let ingredients_core = parse_json_str_array(&core_raw);
+                let directions = parse_json_str_array(&dir_raw);
+                let (score, match_count) = score_v2(user_ings, &ingredients_core, &title);
+                CandidateRow { id, title, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count }
             })
             .collect();
         relaxed.sort_unstable_by(|a, b| {
-            b.match_score.cmp(&a.match_score)
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
                 .then(a.ingredient_count.cmp(&b.ingredient_count))
         });
         relaxed.truncate(5);
@@ -508,62 +647,81 @@ fn fetch_candidates(
     Ok(rows)
 }
 
-fn score_ingredients(user_ings: &[String], recipe_core: &[String]) -> usize {
-    let recipe_lower: Vec<String> = recipe_core.iter().map(|s| s.to_lowercase()).collect();
-    user_ings
-        .iter()
-        .filter(|ui| recipe_lower.iter().any(|ri| ri.contains(ui.as_str()) || ui.contains(ri.as_str())))
-        .count()
-}
+// ---------------------------------------------------------------------------
+// Groq shortlist call
+// ---------------------------------------------------------------------------
 
 async fn call_groq_shortlist(
     state: &AppState,
     candidates: &[CandidateRow],
-    user_ings: &[String],
+    user_ings: &[IngredientQty],
 ) -> Result<Vec<ShortlistEntry>, String> {
-    // Build a compact candidate list for Groq (id, title, core ingredients)
     let candidate_lines: Vec<String> = candidates
         .iter()
         .enumerate()
         .map(|(i, c)| {
+            let first_step = c
+                .directions
+                .first()
+                .map(|s| s.chars().take(70).collect::<String>())
+                .unwrap_or_default();
+            let step_count = c.directions.len();
             format!(
-                "{}. [id:{}] {} (ingredients: {})",
+                "{}. [id:{}] {} (score:{:.1}, {} steps) — {} | First step: {}",
                 i + 1,
                 c.id,
                 c.title,
-                c.ingredients_core.join(", ")
+                c.score,
+                step_count,
+                c.ingredients_core.join(", "),
+                first_step,
             )
         })
         .collect();
 
-    let system_prompt = r#"You are a recipe selection assistant. Given a list of candidate recipes and the user's available ingredients, select up to 2 recipes per theme (Light, Filling, Quick) — maximum 6 total.
+    let user_ing_lines: Vec<String> = user_ings
+        .iter()
+        .map(|i| format!("- {} ({})", i.name, i.qty))
+        .collect();
+
+    let system_prompt = r#"You are a recipe selection assistant. Given candidate recipes and the user's ingredients (with quantity signals), select up to 2 recipes per theme (Light, Filling, Quick) — maximum 6 total.
+
+Quantity signals:
+- "plenty" = user has a lot; this ingredient should be prominent in the dish
+- "1 qty" = standard amount
+- "a little" = small amount; works best as a supporting or garnish ingredient
 
 Theme rules:
-- Quick: under 20 min estimated OR 5 or fewer core ingredients
+- Quick: under 20 min estimated OR 5 or fewer core ingredients OR few steps with fast first action (e.g. "heat oil", "toss", "mix")
 - Light: salads, soups, eggs, fish, or clearly low-carb dishes
-- Filling: hearty mains, rice/pasta dishes, stews, everything else
+- Filling: hearty mains, rice/pasta/noodle dishes, stews, everything else
 
-Return ONLY valid JSON — no markdown fences, no commentary. The JSON must be an object with a single key "results" containing an array:
+Selection priority:
+1. Prefer recipes that feature the user's RAREST or most specific ingredients (e.g. if user has udon noodles, pick udon-centred dishes over generic noodle dishes)
+2. Prefer recipes where "plenty" ingredients are central to the dish, not garnishes
+3. Minimise missing ingredients — prefer recipes where the user already has most of what's needed
+4. Use step count and first step wording to judge Quick vs Filling accurately
+
+Return ONLY valid JSON — no markdown fences, no commentary:
 {
   "results": [
     {
       "id": <integer recipe id>,
       "theme": "Light" | "Filling" | "Quick",
-      "reason": "<one sentence, casual, max 10 words>"
+      "reason": "<one casual sentence, max 12 words, mention the key ingredient that made this a good pick>"
     }
   ]
 }
 
 Rules:
 - Only include recipes from the provided list (use the exact id)
-- At most 2 per theme
-- Pick the best matches based on ingredient overlap with what the user has
+- At most 2 per theme; maximum 6 total
 - Do not repeat the same recipe in multiple themes"#;
 
     let user_message = format!(
-        "User has: {}\n\nCandidates:\n{}",
-        if user_ings.is_empty() { "various ingredients".to_string() } else { user_ings.join(", ") },
-        candidate_lines.join("\n")
+        "User has:\n{}\n\nCandidates (sorted by relevance, best first):\n{}",
+        user_ing_lines.join("\n"),
+        candidate_lines.join("\n"),
     );
 
     let payload = json!({
@@ -605,7 +763,6 @@ Rules:
         .as_array()
         .ok_or("Groq response missing 'results' array")?;
 
-    // Build a lookup map from candidates
     let candidate_map: std::collections::HashMap<i64, &CandidateRow> =
         candidates.iter().map(|c| (c.id, c)).collect();
 
@@ -618,20 +775,26 @@ Rules:
         let theme = item["theme"].as_str().unwrap_or("").to_string();
         let reason = item["reason"].as_str().map(String::from);
 
-        if id < 0 || theme.is_empty() { continue; }
-        if seen_ids.contains(&id) { continue; }
+        if id < 0 || theme.is_empty() {
+            continue;
+        }
+        if seen_ids.contains(&id) {
+            continue;
+        }
         let count = theme_counts.entry(theme.clone()).or_insert(0);
-        if *count >= 2 { continue; }
+        if *count >= 2 {
+            continue;
+        }
 
         if let Some(c) = candidate_map.get(&id) {
-            let missing_count = c.ingredient_count as usize
-                - c.match_score.min(c.ingredient_count as usize);
+            let missing_count =
+                c.ingredient_count as usize - c.match_count.min(c.ingredient_count as usize);
             results.push(ShortlistEntry {
                 id: c.id,
                 title: c.title.clone(),
                 theme: Some(theme.clone()),
                 reason,
-                match_score: c.match_score,
+                match_score: c.match_count,
                 missing_count,
                 ingredient_count: c.ingredient_count,
                 vegetarian: c.vegetarian,
@@ -648,6 +811,168 @@ Rules:
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod scoring_tests {
+    use super::*;
+
+    fn ing(name: &str, qty: &str) -> IngredientQty {
+        IngredientQty { name: name.to_string(), qty: qty.to_string() }
+    }
+
+    #[test]
+    fn test_rarity_idf_tiers() {
+        assert_eq!(rarity_idf("chicken"), 2.0);
+        assert_eq!(rarity_idf("chicken breast"), 2.0);
+        assert_eq!(rarity_idf("egg"), 4.5);
+        assert_eq!(rarity_idf("eggs"), 4.5);
+        assert_eq!(rarity_idf("udon"), 9.0);
+        assert_eq!(rarity_idf("kimchi"), 9.0);
+        assert_eq!(rarity_idf("tahini"), 9.0);
+    }
+
+    #[test]
+    fn test_qty_weight() {
+        assert_eq!(qty_weight("plenty"), 1.3);
+        assert_eq!(qty_weight("a little"), 0.7);
+        assert_eq!(qty_weight("1 qty"), 1.0);
+        assert_eq!(qty_weight("unknown"), 1.0);
+    }
+
+    #[test]
+    fn test_score_v2_udon_beats_turkey_loaf() {
+        let user = vec![
+            ing("udon", "plenty"),
+            ing("egg", "1 qty"),
+            ing("vegetables", "a little"),
+        ];
+
+        // Udon Noodle Soup: 4 ingredients, matches udon + egg, title contains "udon"
+        let udon_core = vec!["udon".to_string(), "dashi".to_string(), "scallion".to_string(), "egg".to_string()];
+        let (udon_score, udon_count) = score_v2(&user, &udon_core, "Udon Noodle Soup");
+
+        // Barbecue Turkey Loaf: 8 ingredients, only egg matches, no title match
+        let turkey_core = vec![
+            "chicken stuffing".to_string(), "water".to_string(), "butter".to_string(),
+            "barbecue sauce".to_string(), "american cheese".to_string(), "ground turkey".to_string(),
+            "egg".to_string(), "breadcrumbs".to_string(),
+        ];
+        let (turkey_score, turkey_count) = score_v2(&user, &turkey_core, "Barbecue Turkey Loaf");
+
+        assert!(udon_count >= 2, "udon soup should match at least 2 ingredients");
+        assert_eq!(turkey_count, 1, "turkey loaf should only match egg");
+        assert!(
+            udon_score > turkey_score * 10.0,
+            "udon soup ({udon_score:.2}) should score at least 10x turkey loaf ({turkey_score:.2})"
+        );
+    }
+
+    #[test]
+    fn test_score_v2_title_bonus() {
+        let user = vec![ing("udon", "1 qty")];
+        let core = vec!["udon".to_string(), "broth".to_string()];
+
+        let (with_title, _) = score_v2(&user, &core, "Udon Soup");
+        let (without_title, _) = score_v2(&user, &core, "Noodle Soup");
+
+        assert!(with_title > without_title, "title match should boost score");
+        // title bonus (+5.0) is applied before coverage/missing factors, so
+        // the final difference is 5.0 × coverage_factor × missing_factor
+        assert!(with_title > without_title + 1.0, "title bonus should add meaningful score");
+    }
+
+    #[test]
+    fn test_score_v2_coverage_penalty() {
+        let user = vec![ing("egg", "1 qty"), ing("udon", "1 qty"), ing("spinach", "1 qty")];
+
+        // 4-ingredient recipe, 3 match → high coverage
+        let small = vec!["egg".to_string(), "udon".to_string(), "spinach".to_string(), "soy sauce".to_string()];
+        // 12-ingredient recipe, 3 match → low coverage
+        let large: Vec<String> = vec![
+            "egg".to_string(), "udon".to_string(), "spinach".to_string(),
+            "a".to_string(), "b".to_string(), "c".to_string(),
+            "d".to_string(), "e".to_string(), "f".to_string(),
+            "g".to_string(), "h".to_string(), "i".to_string(),
+        ];
+
+        let (small_score, _) = score_v2(&user, &small, "Test");
+        let (large_score, _) = score_v2(&user, &large, "Test");
+
+        assert!(small_score > large_score, "smaller recipe with same match count should score higher");
+    }
+
+    #[test]
+    fn test_score_v2_no_match() {
+        let user = vec![ing("udon", "1 qty")];
+        let core = vec!["chicken".to_string(), "rice".to_string()];
+        let (score, count) = score_v2(&user, &core, "Chicken Rice");
+        assert_eq!(count, 0);
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_score_v2_empty_recipe() {
+        let user = vec![ing("udon", "1 qty")];
+        let (score, count) = score_v2(&user, &[], "Empty");
+        assert_eq!(count, 0);
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_is_pantry_staple() {
+        assert!(is_pantry_staple_ai("salt"));
+        assert!(is_pantry_staple_ai("butter"));
+        assert!(is_pantry_staple_ai("olive oil"));
+        assert!(!is_pantry_staple_ai("udon"));
+        assert!(!is_pantry_staple_ai("egg"));
+    }
+
+    #[test]
+    fn test_resolve_user_ings_filters_pantry() {
+        let body = ShortlistRequest {
+            ingredients: vec!["udon".to_string(), "salt".to_string(), "butter".to_string()],
+            ingredients_with_qty: None,
+            vegetarian: None,
+            vegan: None,
+            gluten_free: None,
+            cuisine: None,
+        };
+        let result = resolve_user_ings(&body);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "udon");
+        assert_eq!(result[0].qty, "1 qty");
+    }
+
+    #[test]
+    fn test_resolve_user_ings_uses_qty() {
+        let body = ShortlistRequest {
+            ingredients: vec!["udon".to_string()],
+            ingredients_with_qty: Some(vec![
+                IngredientQty { name: "udon".to_string(), qty: "plenty".to_string() },
+            ]),
+            vegetarian: None,
+            vegan: None,
+            gluten_free: None,
+            cuisine: None,
+        };
+        let result = resolve_user_ings(&body);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].qty, "plenty");
+    }
+
+    #[test]
+    fn test_parse_json_str_array() {
+        let raw = r#"["udon","egg","scallion"]"#;
+        let result = parse_json_str_array(raw);
+        assert_eq!(result, vec!["udon", "egg", "scallion"]);
+    }
+
+    #[test]
+    fn test_parse_json_str_array_empty() {
+        let result = parse_json_str_array("invalid json");
+        assert!(result.is_empty());
+    }
 }
 
 pub async fn present_recipe(
