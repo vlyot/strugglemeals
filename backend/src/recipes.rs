@@ -325,7 +325,7 @@ pub async fn get_one(
                 .map(|r| {
                     let r_lower = r.to_lowercase();
                     let optional = is_pantry_staple_ai(&r_lower)
-                        || word_tokens(&r_lower).any(|t| is_pantry_staple_ai(t));
+                        || word_tokens(&r_lower).any(is_pantry_staple_ai);
                     RawIngredient { hint: hint_for(&r), raw: r, optional }
                 })
                 .collect();

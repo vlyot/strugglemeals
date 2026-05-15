@@ -502,7 +502,7 @@ pub async fn theme_shortlist(
     .filter_map(|e| async { e });
 
     let s = stream::once(async move { Ok::<_, Infallible>(scores_event) })
-        .chain(themes_stream.map(|e| Ok::<_, Infallible>(e)));
+        .chain(themes_stream.map(Ok::<_, Infallible>));
 
     Sse::new(s).keep_alive(KeepAlive::default())
 }
@@ -566,9 +566,9 @@ fn rarity_idf(ingredient: &str) -> f64 {
         "corn", "bean", "beans", "lentil", "lentils", "shrimp",
     ];
     let toks: Vec<&str> = word_tokens(ingredient).collect();
-    if ULTRA_COMMON.iter().any(|&s| toks.iter().any(|&t| t == s)) {
+    if ULTRA_COMMON.iter().any(|&s| toks.contains(&s)) {
         2.0
-    } else if COMMON.iter().any(|&s| toks.iter().any(|&t| t == s)) {
+    } else if COMMON.iter().any(|&s| toks.contains(&s)) {
         4.5
     } else {
         9.0
@@ -652,7 +652,7 @@ fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) ->
     // score higher than bloated ones with the same absolute match count.
     // Max bonus of 1.25× at core_len=2, tapering to 1.0× at core_len≥7.
     let simplicity_bonus = if n <= 6.0 && coverage >= 0.5 {
-        1.0 + (0.25 * ((6.0 - n) / 4.0).max(0.0).min(1.0))
+        1.0 + (0.25 * ((6.0 - n) / 4.0).clamp(0.0, 1.0))
     } else {
         1.0
     };
@@ -839,7 +839,7 @@ fn fetch_candidates(
             let total = ingredient_count as f64;
             let core_len = ingredients_core.len() as f64;
             if total > 0.0 {
-                let pantry_ratio = ((total - core_len) / total).max(0.0).min(1.0);
+                let pantry_ratio = ((total - core_len) / total).clamp(0.0, 1.0);
                 score *= (1.0 - pantry_ratio.powi(2) * 0.7).max(0.1);
             }
             let match_count = matched_ingredients.len();
@@ -917,7 +917,7 @@ fn fetch_candidates(
                 let total = ingredient_count as f64;
                 let core_len = ingredients_core.len() as f64;
                 if total > 0.0 {
-                    let pantry_ratio = ((total - core_len) / total).max(0.0).min(1.0);
+                    let pantry_ratio = ((total - core_len) / total).clamp(0.0, 1.0);
                     score *= (1.0 - pantry_ratio.powi(2) * 0.7).max(0.1);
                 }
                 let match_count = matched_ingredients.len();
@@ -1877,7 +1877,7 @@ Steps: rewrite each direction as a clean imperative sentence. Preserve all detai
     presented.substitutions.retain(|s| {
         let ing_lower = s.ingredient.to_lowercase();
         !is_pantry_staple_ai(&ing_lower)
-            && !word_tokens(&ing_lower).any(|t| is_pantry_staple_ai(t))
+            && !word_tokens(&ing_lower).any(is_pantry_staple_ai)
     });
 
     Ok(presented)
