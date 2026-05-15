@@ -54,7 +54,7 @@ async fn main() {
              PRAGMA cache_size=-65536;",
         )
         .expect("Failed to apply SQLite pragmas");
-        tracing::info!("SQLite pragmas applied (WAL, 64MB cache)");
+        tracing::info!("SQLite pragmas applied (WAL mode, 64MB page cache)");
     }
 
     let http = reqwest::Client::new();
