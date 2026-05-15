@@ -34,6 +34,13 @@ export default function CookPage() {
   })
   const [cuisine, setCuisine] = useState("")
 
+  // Photo scan state
+  const [photoScanDone, setPhotoScanDone] = useState(false)
+  const [photoScanCount, setPhotoScanCount] = useState(0)
+  const [suggestions, setSuggestions] = useState<string[]>([])
+  const [detectedWithConf, setDetectedWithConf] = useState<Array<{ name: string; confidence: number }>>([])
+  const [confidenceLegend, setConfidenceLegend] = useState<{ high: string; mid: string; low: string } | null>(null)
+
   // Flow state
   const [step, setStep] = useState<Step>("method")
   const [defaultTab, setDefaultTab] = useState<"text" | "photo">("text")
@@ -91,7 +98,12 @@ export default function CookPage() {
     setFilters((prev) => ({ ...prev, [key]: !prev[key] }))
   }
 
-  const handlePhotoIngredients = (names: string[]) => {
+  const handlePhotoIngredients = (
+    names: string[],
+    detected: Array<{ name: string; confidence: number }>,
+    incomingSuggestions: string[],
+    legend: { high: string; mid: string; low: string } | null,
+  ) => {
     setIngredients((prev) => {
       const merged = [...prev]
       for (const n of names) {
@@ -101,6 +113,25 @@ export default function CookPage() {
       }
       return merged
     })
+    setDetectedWithConf(detected)
+    setSuggestions(incomingSuggestions.filter((s) => !names.includes(s)))
+    setConfidenceLegend(legend)
+    setPhotoScanDone(true)
+    setPhotoScanCount(names.length)
+  }
+
+  const acceptSuggestion = (name: string) => {
+    addIngredient(name)
+    setSuggestions((prev) => prev.filter((s) => s !== name))
+  }
+
+  const acceptAllSuggestions = () => {
+    suggestions.forEach(addIngredient)
+    setSuggestions([])
+  }
+
+  const dismissSuggestion = (name: string) => {
+    setSuggestions((prev) => prev.filter((s) => s !== name))
   }
 
   const handleFindRecipes = async () => {
@@ -270,6 +301,14 @@ export default function CookPage() {
               onCuisineChange={setCuisine}
               onPhotoIngredients={handlePhotoIngredients}
               onSubmit={handleFindRecipes}
+              suggestions={suggestions}
+              detectedWithConf={detectedWithConf}
+              confidenceLegend={confidenceLegend}
+              hasDonePhotoScan={photoScanDone}
+              photoScanCount={photoScanCount}
+              onAcceptSuggestion={acceptSuggestion}
+              onAcceptAllSuggestions={acceptAllSuggestions}
+              onDismissSuggestion={dismissSuggestion}
             />
 
             {inputError && (

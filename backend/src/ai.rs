@@ -56,9 +56,27 @@ fn default_mime() -> String {
     "image/jpeg".to_string()
 }
 
+/// A single detected ingredient with a vision-model confidence score.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct DetectedIngredient {
+    pub name: String,
+    /// 0.0–10.0: how certain the model is that this ingredient is present.
+    pub confidence: f32,
+}
+
 #[derive(Debug, Serialize)]
 pub struct IdentifyResponse {
+    /// Flattened names — kept for the frontend chip-merge path.
     pub ingredients: Option<Vec<String>>,
+    /// Full detection results including per-ingredient confidence scores.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected: Option<Vec<DetectedIngredient>>,
+    /// Inferred pantry staples likely present given the detected ingredients.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestions: Option<Vec<String>>,
+    /// Legend explaining the confidence score bands to show the user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence_legend: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,6 +92,9 @@ pub async fn identify_ingredients(
             StatusCode::OK,
             Json(IdentifyResponse {
                 ingredients: None,
+                detected: None,
+                suggestions: None,
+                confidence_legend: None,
                 error: Some("fallback".into()),
                 message: Some("Gemini API key not configured".into()),
             }),
@@ -87,6 +108,9 @@ pub async fn identify_ingredients(
             StatusCode::OK,
             Json(IdentifyResponse {
                 ingredients: None,
+                detected: None,
+                suggestions: None,
+                confidence_legend: None,
                 error: Some("fallback".into()),
                 message: Some("Image too large (max 4 MB)".into()),
             }),
@@ -97,6 +121,9 @@ pub async fn identify_ingredients(
             StatusCode::OK,
             Json(IdentifyResponse {
                 ingredients: None,
+                detected: None,
+                suggestions: None,
+                confidence_legend: None,
                 error: Some("fallback".into()),
                 message: Some("Invalid base64 encoding".into()),
             }),
@@ -106,20 +133,29 @@ pub async fn identify_ingredients(
     let result = call_gemini(&state, &body.image_base64, &body.mime_type).await;
 
     match result {
-        Ok(ingredients) => (
-            StatusCode::OK,
-            Json(IdentifyResponse {
-                ingredients: Some(ingredients),
-                error: None,
-                message: None,
-            }),
-        ),
+        Ok((detected, suggestions, legend)) => {
+            let ingredients: Vec<String> = detected.iter().map(|d| d.name.clone()).collect();
+            (
+                StatusCode::OK,
+                Json(IdentifyResponse {
+                    ingredients: Some(ingredients),
+                    detected: Some(detected),
+                    suggestions: if suggestions.is_empty() { None } else { Some(suggestions) },
+                    confidence_legend: Some(legend),
+                    error: None,
+                    message: None,
+                }),
+            )
+        }
         Err(e) => {
             tracing::warn!("Gemini identify failed: {e}");
             (
                 StatusCode::OK,
                 Json(IdentifyResponse {
                     ingredients: None,
+                    detected: None,
+                    suggestions: None,
+                    confidence_legend: None,
                     error: Some("fallback".into()),
                     message: Some("Could not identify ingredients from image".into()),
                 }),
@@ -133,18 +169,35 @@ async fn call_gemini(
     state: &AppState,
     image_b64: &str,
     mime_type: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<DetectedIngredient>, Vec<String>, Value), String> {
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}",
         state.gemini_api_key
     );
 
+    let prompt = concat!(
+        "You are a kitchen assistant. Analyse this fridge/pantry photo and return a JSON object ",
+        "with exactly three keys:\n",
+        "- \"detected\": array of objects for each distinct raw food ingredient you can see. ",
+        "Each object: {\"name\": \"<lowercase string>\", \"confidence\": <float 0.0-10.0>}. ",
+        "Confidence reflects how certain you are it is present and identifiable ",
+        "(10.0 = unmistakably clear, 5.0 = plausible but partially obscured, 1.0 = barely visible guess).\n",
+        "- \"likely_have\": array of lowercase strings — common pantry staples not visible but ",
+        "almost certainly present given the detected ingredients (e.g. salt, oil, garlic). Max 6 items.\n",
+        "- \"legend\": object with three keys \"high\", \"mid\", \"low\" each a short phrase explaining ",
+        "the confidence bands to show the user. ",
+        "Example: {\"high\": \"clearly visible\", \"mid\": \"partially visible\", \"low\": \"hard to tell\"}.\n\n",
+        "Example output:\n",
+        "{\"detected\":[{\"name\":\"chicken\",\"confidence\":9.2},{\"name\":\"broccoli\",\"confidence\":7.1}],",
+        "\"likely_have\":[\"salt\",\"oil\",\"garlic\"],",
+        "\"legend\":{\"high\":\"clearly visible\",\"mid\":\"partially visible\",\"low\":\"hard to tell\"}}\n\n",
+        "Return ONLY the JSON object, nothing else."
+    );
+
     let payload = json!({
         "contents": [{
             "parts": [
-                {
-                    "text": "You are a kitchen assistant. List only the distinct raw food ingredients visible in this image. Return a JSON array of lowercase strings, e.g. [\"chicken\", \"broccoli\"]. No quantities, no commentary, no non-food items. Return ONLY the JSON array, nothing else."
-                },
+                { "text": prompt },
                 {
                     "inline_data": {
                         "mime_type": mime_type,
@@ -155,7 +208,7 @@ async fn call_gemini(
         }],
         "generationConfig": {
             "temperature": 0.1,
-            "maxOutputTokens": 512
+            "maxOutputTokens": 1024
         }
     });
 
@@ -172,7 +225,7 @@ async fn call_gemini(
 
         if status.is_success() {
             let body: Value = resp.json().await.map_err(|e| e.to_string())?;
-            return parse_gemini_ingredients(&body);
+            return parse_gemini_response(&body);
         }
 
         // Retry once on rate-limit or server error
@@ -189,32 +242,93 @@ async fn call_gemini(
     Err("Gemini API unavailable after retry".into())
 }
 
-fn parse_gemini_ingredients(body: &Value) -> Result<Vec<String>, String> {
+/// Parse the structured Gemini response: `{detected, likely_have, legend}`.
+///
+/// Falls back to treating the output as a plain `[...]` array (old format) if the
+/// object parse fails, so a Gemini format regression doesn't silently break detection.
+fn parse_gemini_response(body: &Value) -> Result<(Vec<DetectedIngredient>, Vec<String>, Value), String> {
     let text = body
         .pointer("/candidates/0/content/parts/0/text")
         .and_then(|v| v.as_str())
         .ok_or("Unexpected Gemini response structure")?;
 
-    // Extract the JSON array from the text (may have surrounding whitespace/newlines)
     let trimmed = text.trim();
-    let start = trimmed.find('[').ok_or("No JSON array in Gemini response")?;
+
+    // Primary path: structured object response.
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        let json_str = &trimmed[start..=end];
+        if let Ok(obj) = serde_json::from_str::<Value>(json_str) {
+            // Extract detected array.
+            let detected: Vec<DetectedIngredient> = obj
+                .get("detected")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            let name = item.get("name")?.as_str()?.trim().to_lowercase();
+                            let confidence = item.get("confidence")?.as_f64()? as f32;
+                            if name.is_empty() { return None; }
+                            Some(DetectedIngredient { name, confidence })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if detected.is_empty() {
+                return Err("Gemini returned empty detected list".into());
+            }
+
+            let detected_names: std::collections::HashSet<&str> =
+                detected.iter().map(|d| d.name.as_str()).collect();
+
+            // Extract likely_have, deduplicated against detected.
+            let suggestions: Vec<String> = obj
+                .get("likely_have")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            let s = v.as_str()?.trim().to_lowercase();
+                            if s.is_empty() || detected_names.contains(s.as_str()) {
+                                return None;
+                            }
+                            Some(s)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let legend = obj
+                .get("legend")
+                .cloned()
+                .unwrap_or_else(|| json!({"high": "clearly visible", "mid": "partially visible", "low": "hard to tell"}));
+
+            return Ok((detected, suggestions, legend));
+        }
+    }
+
+    // Fallback: plain array format — assign confidence 10.0 to all.
+    let start = trimmed.find('[').ok_or("No JSON in Gemini response")?;
     let end = trimmed.rfind(']').ok_or("No closing bracket in Gemini response")?;
     let json_str = &trimmed[start..=end];
 
     let arr: Vec<Value> = serde_json::from_str(json_str)
         .map_err(|e| format!("Failed to parse Gemini JSON: {e}"))?;
 
-    let ingredients: Vec<String> = arr
+    let detected: Vec<DetectedIngredient> = arr
         .into_iter()
-        .filter_map(|v| v.as_str().map(|s| s.trim().to_lowercase()))
-        .filter(|s| !s.is_empty())
+        .filter_map(|v| {
+            let name = v.as_str()?.trim().to_lowercase();
+            if name.is_empty() { return None; }
+            Some(DetectedIngredient { name, confidence: 10.0 })
+        })
         .collect();
 
-    if ingredients.is_empty() {
+    if detected.is_empty() {
         return Err("Gemini returned empty ingredient list".into());
     }
 
-    Ok(ingredients)
+    Ok((detected, vec![], json!({"high": "clearly visible", "mid": "partially visible", "low": "hard to tell"})))
 }
 
 // ---------------------------------------------------------------------------
@@ -992,6 +1106,117 @@ Rules:
     }
 
     Ok(results)
+}
+
+#[cfg(test)]
+mod identify_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_body(text: &str) -> Value {
+        json!({
+            "candidates": [{
+                "content": {
+                    "parts": [{ "text": text }]
+                }
+            }]
+        })
+    }
+
+    #[test]
+    fn parse_gemini_response_full() {
+        let body = make_body(
+            r#"{"detected":[{"name":"chicken","confidence":9.2},{"name":"broccoli","confidence":7.1}],"likely_have":["salt","oil","garlic"],"legend":{"high":"clearly visible","mid":"partially visible","low":"hard to tell"}}"#,
+        );
+        let (detected, suggestions, legend) = parse_gemini_response(&body).unwrap();
+        assert_eq!(detected.len(), 2);
+        assert_eq!(detected[0].name, "chicken");
+        assert!((detected[0].confidence - 9.2).abs() < 0.01);
+        assert_eq!(detected[1].name, "broccoli");
+        assert_eq!(suggestions, vec!["salt", "oil", "garlic"]);
+        assert_eq!(legend["high"], "clearly visible");
+    }
+
+    #[test]
+    fn parse_gemini_response_deduplicates_suggestions() {
+        // "garlic" appears in both detected and likely_have — must be removed from suggestions.
+        let body = make_body(
+            r#"{"detected":[{"name":"chicken","confidence":8.0},{"name":"garlic","confidence":6.0}],"likely_have":["garlic","salt","oil"],"legend":{"high":"h","mid":"m","low":"l"}}"#,
+        );
+        let (_, suggestions, _) = parse_gemini_response(&body).unwrap();
+        assert!(!suggestions.contains(&"garlic".to_string()));
+        assert!(suggestions.contains(&"salt".to_string()));
+        assert!(suggestions.contains(&"oil".to_string()));
+    }
+
+    #[test]
+    fn parse_gemini_response_empty_detected_errors() {
+        let body = make_body(
+            r#"{"detected":[],"likely_have":["salt"],"legend":{"high":"h","mid":"m","low":"l"}}"#,
+        );
+        assert!(parse_gemini_response(&body).is_err());
+    }
+
+    #[test]
+    fn parse_gemini_response_missing_likely_have() {
+        // likely_have key absent — should still succeed with empty suggestions.
+        let body = make_body(
+            r#"{"detected":[{"name":"egg","confidence":9.0}],"legend":{"high":"h","mid":"m","low":"l"}}"#,
+        );
+        let (detected, suggestions, _) = parse_gemini_response(&body).unwrap();
+        assert_eq!(detected[0].name, "egg");
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn parse_gemini_response_fallback_plain_array() {
+        // Old format: plain JSON array — falls back to confidence 10.0 for all.
+        let body = make_body(r#"["chicken", "broccoli", "garlic"]"#);
+        let (detected, suggestions, _) = parse_gemini_response(&body).unwrap();
+        assert_eq!(detected.len(), 3);
+        assert_eq!(detected[0].name, "chicken");
+        assert!((detected[0].confidence - 10.0).abs() < 0.01);
+        assert!(suggestions.is_empty());
+    }
+
+    #[test]
+    fn parse_gemini_response_confidence_values_accepted() {
+        // Confidence values outside 0–10 are accepted as-is (clamping is UI-only).
+        let body = make_body(
+            r#"{"detected":[{"name":"mystery","confidence":11.5},{"name":"trace","confidence":-0.5}],"likely_have":[],"legend":{"high":"h","mid":"m","low":"l"}}"#,
+        );
+        let (detected, _, _) = parse_gemini_response(&body).unwrap();
+        assert_eq!(detected.len(), 2);
+        assert!((detected[0].confidence - 11.5).abs() < 0.01);
+        assert!((detected[1].confidence - (-0.5)).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_gemini_response_missing_legend_uses_default() {
+        // No legend key — should still succeed with a default legend.
+        let body = make_body(
+            r#"{"detected":[{"name":"tomato","confidence":8.5}],"likely_have":["salt"]}"#,
+        );
+        let (_, _, legend) = parse_gemini_response(&body).unwrap();
+        assert!(legend.get("high").is_some());
+        assert!(legend.get("mid").is_some());
+        assert!(legend.get("low").is_some());
+    }
+
+    #[test]
+    fn parse_gemini_response_trims_and_lowercases_names() {
+        let body = make_body(
+            r#"{"detected":[{"name":" Chicken Breast ","confidence":9.0}],"likely_have":[],"legend":{"high":"h","mid":"m","low":"l"}}"#,
+        );
+        let (detected, _, _) = parse_gemini_response(&body).unwrap();
+        assert_eq!(detected[0].name, "chicken breast");
+    }
+
+    #[test]
+    fn parse_gemini_response_no_json_errors() {
+        let body = make_body("I can see some food in your fridge.");
+        assert!(parse_gemini_response(&body).is_err());
+    }
 }
 
 #[cfg(test)]
