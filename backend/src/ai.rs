@@ -489,6 +489,12 @@ fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) ->
     let mut matched_names: Vec<String> = Vec::new();
     let mut weighted_sum = 0.0f64;
 
+    // Ingredient anchor boost: if any user ingredient is the star of the dish
+    // (appears in the title OR is the first core ingredient), reward that recipe.
+    // Boost scales with IDF so specific ingredients (kimchi, udon) reward more than
+    // generic ones (chicken, rice). Takes the max boost across all user ingredients.
+    let mut anchor_boost = 1.0f64;
+
     for ui in user_ings {
         let name = ui.name.to_lowercase();
         let hits = recipe_lower
@@ -507,6 +513,13 @@ fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) ->
         let title_match = name_toks.iter().any(|nt| title_toks.iter().any(|tt| tt == nt));
         let title_bonus = if title_match { idf * 0.6 } else { 0.0 };
         weighted_sum += idf * qty + title_bonus;
+
+        // Anchor check: in title OR first core ingredient.
+        let is_first = recipe_lower.first().map(|f| tokens_overlap(f, &name)).unwrap_or(false);
+        if title_match || is_first {
+            // Scale: idf=9.0 → +35%; idf=4.5 → +17%; idf=2.0 → +8%
+            anchor_boost = anchor_boost.max(1.0 + (idf / 9.0) * 0.35);
+        }
     }
 
     let matched = matched_names.len();
@@ -521,7 +534,32 @@ fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) ->
     let missing_ratio = (n - matched as f64) / n;
     let missing_factor = 1.0 - (missing_ratio.powi(2) * 0.5);
 
-    (weighted_sum * coverage_factor * missing_factor, matched_names)
+    // Simplicity reward: short recipes where the user covers most ingredients
+    // score higher than bloated ones with the same absolute match count.
+    // Max bonus of 1.25× at core_len=2, tapering to 1.0× at core_len≥7.
+    let simplicity_bonus = if n <= 6.0 && coverage >= 0.5 {
+        1.0 + (0.25 * ((6.0 - n) / 4.0).max(0.0).min(1.0))
+    } else {
+        1.0
+    };
+
+    // Pantry focus: reward recipes that draw on a large fraction of the user's
+    // non-staple ingredients. Only active when the user has a diverse pantry
+    // (user_n > 5) — for small/focused pantries, coverage_factor already suffices.
+    // sqrt exponent: mild compression so 50% pantry use (0.707) is still respectable
+    // but 20% pantry use (0.447) is meaningfully penalised.
+    let user_n = user_ings.len() as f64;
+    let pantry_focus = if user_n > 5.0 {
+        (matched as f64 / user_n).powf(0.5)
+    } else {
+        1.0
+    };
+
+    (
+        weighted_sum * coverage_factor * missing_factor * simplicity_bonus * anchor_boost
+            * pantry_focus,
+        matched_names,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -680,6 +718,16 @@ fn fetch_candidates(
                     score *= 1.25;
                 }
             }
+            // Pantry-heavy penalty: recipes whose ingredients_core is tiny relative to their
+            // total ingredient count are likely baking recipes where pantry staples are required
+            // (flour, sugar, baking powder, etc.) and cannot be improvised. Suppress them.
+            // pantry_ratio=0.875 (tea cakes) → ×0.46; pantry_ratio=0.3 (stir-fry) → ×0.94.
+            let total = ingredient_count as f64;
+            let core_len = ingredients_core.len() as f64;
+            if total > 0.0 {
+                let pantry_ratio = ((total - core_len) / total).max(0.0).min(1.0);
+                score *= (1.0 - pantry_ratio.powi(2) * 0.7).max(0.1);
+            }
             let match_count = matched_ingredients.len();
             CandidateRow { id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count, matched_ingredients }
         })
@@ -751,6 +799,12 @@ fn fetch_candidates(
                     if rl.contains(rql.as_str()) || rql.contains(rl.as_str()) {
                         score *= 1.25;
                     }
+                }
+                let total = ingredient_count as f64;
+                let core_len = ingredients_core.len() as f64;
+                if total > 0.0 {
+                    let pantry_ratio = ((total - core_len) / total).max(0.0).min(1.0);
+                    score *= (1.0 - pantry_ratio.powi(2) * 0.7).max(0.1);
                 }
                 let match_count = matched_ingredients.len();
                 CandidateRow { id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count, matched_ingredients }
@@ -1243,6 +1297,238 @@ mod scoring_tests {
         let result = parse_json_str_array("invalid json");
         assert!(result.is_empty());
     }
+
+    // ---------------------------------------------------------------------------
+    // Pantry penalty tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_pantry_penalty_values() {
+        let calc = |total: f64, core: f64| -> f64 {
+            let r = ((total - core) / total).max(0.0).min(1.0);
+            (1.0 - r.powi(2) * 0.7).max(0.1)
+        };
+        // Tea Cakes: 8 total, 1 core → pantry_ratio=0.875 → heavy penalty
+        let tea_cake = calc(8.0, 1.0);
+        assert!(tea_cake < 0.55, "tea cake penalty should be severe: {tea_cake:.3}");
+        // Normal stir-fry: 10 total, 7 core → pantry_ratio=0.3 → barely penalised
+        let normal = calc(10.0, 7.0);
+        assert!(normal > 0.9, "normal recipe barely penalized: {normal:.3}");
+        // Clean recipe: all core, no pantry → no penalty
+        let clean = calc(8.0, 8.0);
+        assert_eq!(clean, 1.0, "no-pantry recipe gets no penalty");
+    }
+
+    #[test]
+    fn test_baking_recipe_suppressed_vs_real_match() {
+        let user = vec![ing("egg", "1 qty"), ing("spinach", "1 qty")];
+
+        // Tea Cakes: 8 total ingredients, only "egg" survived pantry stripping into core.
+        // Pantry penalty applied externally (as fetch_candidates does it).
+        let tea_core = vec!["egg".to_string()];
+        let (mut tea_score, _) = score_v2(&user, &tea_core, "Old-Fashioned Tea Cakes");
+        let r = ((8.0_f64 - 1.0) / 8.0).max(0.0).min(1.0);
+        tea_score *= (1.0 - r.powi(2) * 0.7_f64).max(0.1);
+
+        // Egg & spinach scramble: 3 total, 3 core (no pantry staples stripped).
+        // Pantry penalty applied externally.
+        let scramble_core = vec!["egg".to_string(), "spinach".to_string(), "feta".to_string()];
+        let (mut scramble_score, _) = score_v2(&user, &scramble_core, "Egg and Spinach Scramble");
+        let r2 = ((3.0_f64 - 3.0) / 3.0).max(0.0).min(1.0);
+        scramble_score *= (1.0 - r2.powi(2) * 0.7_f64).max(0.1);
+
+        assert!(
+            scramble_score > tea_score,
+            "egg+spinach scramble ({scramble_score:.3}) should rank above tea cakes ({tea_score:.3}) after pantry penalty"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Anchor boost tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_anchor_boost_udon_title() {
+        let user = vec![ing("udon", "1 qty"), ing("vegetable", "1 qty")];
+
+        // Yaki Udon: udon in title AND first core item → full anchor boost
+        let yaki_core = vec!["udon".to_string(), "vegetables".to_string()];
+        let (yaki_score, _) = score_v2(&user, &yaki_core, "Yaki Udon");
+
+        // Chicken soup with udon buried in the middle — udon not the star
+        let soup_core = vec![
+            "chicken".to_string(), "mushroom".to_string(),
+            "bok choy".to_string(), "udon".to_string(),
+        ];
+        let (soup_score, _) = score_v2(&user, &soup_core, "Chicken Mushroom Soup");
+
+        assert!(
+            yaki_score > soup_score,
+            "yaki udon ({yaki_score:.3}) should rank above chicken soup ({soup_score:.3})"
+        );
+    }
+
+    #[test]
+    fn test_anchor_boost_kimchi() {
+        let user = vec![ing("kimchi", "1 qty"), ing("egg", "1 qty")];
+
+        // Kimchi Fried Rice: kimchi in title and first core item
+        let kimchi_core = vec!["kimchi".to_string(), "egg".to_string(), "rice".to_string()];
+        let (kimchi_score, _) = score_v2(&user, &kimchi_core, "Kimchi Fried Rice");
+
+        // Generic egg fried rice: kimchi absent
+        let plain_core = vec![
+            "egg".to_string(), "rice".to_string(),
+            "carrot".to_string(), "peas".to_string(),
+        ];
+        let (plain_score, _) = score_v2(&user, &plain_core, "Egg Fried Rice");
+
+        assert!(
+            kimchi_score > plain_score,
+            "kimchi fried rice ({kimchi_score:.3}) should beat plain egg fried rice ({plain_score:.3})"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Simplicity reward tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_simplicity_reward() {
+        let user = vec![ing("egg", "1 qty"), ing("vegetable", "1 qty")];
+
+        // Simple 2-ingredient recipe: 2/2 matched
+        let simple_core = vec!["egg".to_string(), "vegetable".to_string()];
+        let (simple_score, _) = score_v2(&user, &simple_core, "Egg and Vegetable");
+
+        // Complex 8-ingredient recipe: same 2 matched, 6 missing
+        let complex_core = vec![
+            "egg".to_string(), "vegetable".to_string(), "tofu".to_string(),
+            "kimchi".to_string(), "sesame".to_string(), "ginger".to_string(),
+            "scallion".to_string(), "chili".to_string(),
+        ];
+        let (complex_score, _) = score_v2(&user, &complex_core, "Kimchi Tofu Egg Bowl");
+
+        assert!(
+            simple_score > complex_score,
+            "simple 2-ing recipe ({simple_score:.3}) should beat complex 8-ing recipe ({complex_score:.3})"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Pantry focus tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_pantry_focus_diverse_vs_focused() {
+        // Same recipe: requires udon + egg + scallion
+        let recipe_core = vec![
+            "udon".to_string(),
+            "egg".to_string(),
+            "scallion".to_string(),
+            "dashi".to_string(),
+        ];
+        // Focused pantry: 3 ingredients, all relevant — user_n=3 ≤ 5, pantry_focus=1.0
+        let focused_user = vec![
+            ing("udon", "1 qty"),
+            ing("egg", "1 qty"),
+            ing("scallion", "1 qty"),
+        ];
+        // Diverse pantry: 10 ingredients, 3 relevant — user_n=10 > 5, pantry_focus=sqrt(0.3)≈0.548
+        let diverse_user = vec![
+            ing("udon", "1 qty"),
+            ing("egg", "1 qty"),
+            ing("scallion", "1 qty"),
+            ing("salmon", "1 qty"),
+            ing("chocolate", "1 qty"),
+            ing("strawberry", "1 qty"),
+            ing("pasta", "1 qty"),
+            ing("kimchi", "1 qty"),
+            ing("broccoli", "1 qty"),
+            ing("tofu", "1 qty"),
+        ];
+        let (focused_score, focused_matched) =
+            score_v2(&focused_user, &recipe_core, "Udon Noodle Soup");
+        let (diverse_score, diverse_matched) =
+            score_v2(&diverse_user, &recipe_core, "Udon Noodle Soup");
+        assert_eq!(focused_matched.len(), 3, "focused user should match 3 ingredients");
+        assert_eq!(diverse_matched.len(), 3, "diverse user should also match 3 ingredients");
+        assert!(
+            focused_score > diverse_score,
+            "focused pantry ({focused_score:.3}) should score higher than diverse pantry ({diverse_score:.3}) for same recipe"
+        );
+    }
+
+    #[test]
+    fn test_pantry_focus_small_pantry_not_penalised() {
+        // user_n=4 and user_n=5 must produce identical scores (guard user_n > 5 fires for both)
+        let recipe_core = vec!["kimchi".to_string(), "egg".to_string(), "rice".to_string()];
+        let user_5 = vec![
+            ing("kimchi", "1 qty"),
+            ing("egg", "1 qty"),
+            ing("salmon", "1 qty"),
+            ing("broccoli", "1 qty"),
+            ing("udon", "1 qty"),
+        ];
+        let user_4 = vec![
+            ing("kimchi", "1 qty"),
+            ing("egg", "1 qty"),
+            ing("salmon", "1 qty"),
+            ing("broccoli", "1 qty"),
+        ];
+        let (score_5, matched_5) = score_v2(&user_5, &recipe_core, "Kimchi Egg Rice");
+        let (score_4, matched_4) = score_v2(&user_4, &recipe_core, "Kimchi Egg Rice");
+        assert_eq!(matched_5.len(), 2);
+        assert_eq!(matched_4.len(), 2);
+        assert_eq!(
+            score_5, score_4,
+            "small pantries (≤5 ings) must not be penalised: score_5={score_5:.4}, score_4={score_4:.4}"
+        );
+    }
+
+    #[test]
+    fn test_diverse_pantry_prefers_more_matches() {
+        // Diverse pantry: 10 non-staple ingredients
+        let user = vec![
+            ing("chicken", "1 qty"),
+            ing("pasta", "1 qty"),
+            ing("broccoli", "1 qty"),
+            ing("egg", "1 qty"),
+            ing("kimchi", "1 qty"),
+            ing("salmon", "1 qty"),
+            ing("tofu", "1 qty"),
+            ing("udon", "1 qty"),
+            ing("strawberry", "1 qty"),
+            ing("chocolate", "1 qty"),
+        ];
+        // Recipe A: uses 6 of the user's ingredients (8 total recipe ingredients)
+        let recipe_a_core = vec![
+            "chicken".to_string(),
+            "pasta".to_string(),
+            "broccoli".to_string(),
+            "egg".to_string(),
+            "kimchi".to_string(),
+            "salmon".to_string(),
+            "cream".to_string(),
+            "mushroom".to_string(),
+        ];
+        // Recipe B: uses 2 of the user's ingredients (5 total — higher recipe-centric coverage)
+        let recipe_b_core = vec![
+            "udon".to_string(),
+            "tofu".to_string(),
+            "wakame".to_string(),
+            "miso".to_string(),
+            "scallion".to_string(),
+        ];
+        let (score_a, matched_a) = score_v2(&user, &recipe_a_core, "Chicken Pasta");
+        let (score_b, matched_b) = score_v2(&user, &recipe_b_core, "Udon Tofu Soup");
+        assert_eq!(matched_a.len(), 6, "recipe A should match 6 user ingredients");
+        assert_eq!(matched_b.len(), 2, "recipe B should match 2 user ingredients");
+        assert!(
+            score_a > score_b,
+            "recipe using more of the user's diverse pantry ({score_a:.3}) should beat one using fewer ({score_b:.3})"
+        );
+    }
 }
 
 pub async fn present_recipe(
@@ -1358,6 +1644,17 @@ Do not include pantry staples (salt, pepper, oil, butter, flour, sugar, common s
             .iter()
             .any(|u| name_lower.contains(u.as_str()) || u.contains(name_lower.as_str()));
     }
+
+    // Strip substitutions for pantry staples — Groq sometimes suggests swaps for
+    // flour, baking powder, sugar etc. despite being instructed not to. These are
+    // either trivially available or genuinely irreplaceable (batter agents), so
+    // showing them as "missing" misleads users. Filter by token-level staple check
+    // to catch multi-word names like "all-purpose flour" or "baking soda".
+    presented.substitutions.retain(|s| {
+        let ing_lower = s.ingredient.to_lowercase();
+        !is_pantry_staple_ai(&ing_lower)
+            && !word_tokens(&ing_lower).any(|t| is_pantry_staple_ai(t))
+    });
 
     Ok(presented)
 }

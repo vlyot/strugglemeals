@@ -24,3 +24,6 @@ Thumbs.db
 .mcp.json
 
 .vercel
+
+# Local SQLite dev stub (full DB lives on Railway volume)
+data/

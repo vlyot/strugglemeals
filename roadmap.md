@@ -138,9 +138,12 @@ _Depends on Phase 2 (dataset query), Phase 3 (auth), and Phase 4 (AI integration
 **Backend — `POST /ai/theme-shortlist`** (new endpoint):
 - Accepts `{ ingredients[], ingredients_with_qty?: [{name, qty}][], vegetarian?, vegan?, gluten_free?, cuisine? }`
 - **Candidate selection:** SQLite `json_each()` EXISTS clauses filter to only recipes containing at least one user ingredient (LIMIT 500) — replaces unfiltered LIMIT 2000
-- **Scoring (TF-IDF / BM25-inspired):** each candidate scored as `(Σ idf(ingredient) × qty_weight(qty) + title_bonus) × coverage_ratio^1.5 × missing_penalty`
+- **Scoring (TF-IDF / BM25-inspired):** each candidate scored as `(Σ idf × qty_weight + title_bonus) × coverage^1.5 × missing_penalty × simplicity_bonus × anchor_boost × pantry_focus × pantry_penalty`
   - IDF tiers: ultra-common (chicken, onion…) → 2.0; common (egg, cheese…) → 4.5; specific/niche (udon, kimchi…) → 9.0
   - Qty weights: "plenty" → 1.3×, "1 qty" → 1.0×, "a little" → 0.7×
+  - Anchor boost: ingredient in title or first in core → `1.0 + (idf/9.0) × 0.35` (niche: +35%, common: +8%)
+  - Simplicity reward: short recipes (core_len ≤ 6, coverage ≥ 50%) → up to 1.25× bonus
+  - Pantry penalty: `max(0.1, 1 − pantry_ratio² × 0.7)` where `pantry_ratio = (total − core) / total`
   - Title bonus: +5.0 if ingredient appears in recipe title
   - Coverage penalty: (matched/total)^1.5 — penalises low-coverage matches
   - Missing penalty: 1 − (missing_ratio² × 0.5) — soft drag for many unfilled ingredients
@@ -202,9 +205,51 @@ _Depends on Phase 6. Final phase before real-world validation._
   - `ingredients_with_qty` passed from frontend to backend
   - SQLite WAL mode + 64MB page cache via startup PRAGMAs
 - 12 unit tests covering all scoring functions (`score_v2`, `rarity_idf`, `qty_weight`, `resolve_user_ings`, etc.)
+- **Algorithm quality pass — 5 improvements (commit `a3b72b3`):**
+  1. **Word-boundary token matching** (`tokens_overlap`): replaces bidirectional substring check — "egg" no longer falsely matches "eggplant", "pea" no longer matches "peanut butter". Both `score_v2` match check and `rarity_idf` IDF tier lookup now use token equality rather than `contains`.
+  2. **IDF-scaled title bonus**: flat +5.0 replaced with `idf × 0.6` — common ingredients (chicken → +1.2) get a smaller title bonus than niche ones (udon/kimchi → +5.4). Title check also uses token matching to prevent "Eggplant Parmesan" from boosting an "egg" query.
+  3. **Relaxation path hardening** (`stem_variants`): when < 3 results, the relaxation retry now generates plural/singular/`-ies` variants for each ingredient, broadens LIKE params accordingly, and always filters `match_count > 0` — no 0-score recipes ever leak into results.
+  4. **Cuisine boost**: `cuisine` column fetched in SQL SELECT; if the user's requested cuisine matches the recipe's cuisine (case-insensitive contains), the post-score is multiplied by 1.25×. Zero-score recipes are unaffected (0 × 1.25 = 0).
+  5. **IDF-weighted SQL ORDER BY** (`idf_sql_weight`): CASE expressions for ORDER BY use weight 3 for niche ingredients, 2 for common, 1 for ultra-common — so the 500-candidate pool is pre-sorted to surface rare-ingredient recipes before common ones.
+- **UI fix** (commit `a3b72b3`): shortlist matched-ingredient chips now correctly show only the ingredients that actually matched (not all user ingredients), sourced from the `matched_ingredients[]` array in the API response.
+- 21 unit tests total (up from 12) — new tests cover `tokens_overlap`, `rarity_idf` no-false-positives, eggplant false-positive regression, `idf_sql_weight` tiers, scaled title bonus, cuisine match logic, `stem_variants` plurals.
+- E2E tested with Playwright: egg+eggplant+tomato scenario confirmed eggplant recipes surface with correct chips; udon+tofu+miso+Asian scenario confirmed relevant noodle/miso results with no irrelevant recipes.
+
+- **Algorithm quality pass 2 — 3 improvements:**
+  1. **Pantry-heavy penalty** (applied in `fetch_candidates()` after `score_v2()`): baking recipes whose `ingredients_core` is tiny relative to `ingredient_count` are suppressed. Formula: `score × max(0.1, 1 − pantry_ratio² × 0.7)` where `pantry_ratio = (ingredient_count − core_len) / ingredient_count`. A recipe with 8 total ingredients but only 1 in core (e.g., "Old-Fashioned Tea Cakes") gets ×0.46; a stir-fry with 10 total, 7 core gets ×0.94.
+  2. **Ingredient anchor boost** (inside `score_v2()`): when any matched user ingredient appears in the recipe title OR is the first item in `ingredients_core`, score is boosted by `1.0 + (idf / 9.0) × 0.35`. Scales with rarity: niche ingredients (kimchi, udon, tofu) → up to +35%; common (egg, cheese) → +17%; ultra-common (chicken, rice) → +8%. No hardcoded ingredient lists — IDF tier drives the magnitude.
+  3. **Simplicity reward** (inside `score_v2()`): short recipes where the user covers most ingredients score higher. Bonus of `1.0 + 0.25 × ((6 − n) / 4).clamp(0,1)` when `core_len ≤ 6` and `coverage ≥ 50%` — up to 1.25× at core_len=2, tapering to 1.0 at core_len=6. Rewards struggle-meal-style recipes (yaki udon, egg scramble) over bloated ones with the same absolute match count.
+- 26 unit tests total (up from 21) — new tests: `test_pantry_penalty_values`, `test_baking_recipe_suppressed_vs_real_match`, `test_anchor_boost_udon_title`, `test_anchor_boost_kimchi`, `test_simplicity_reward`.
+- E2E tested with Playwright (May 2026): egg+vegetable → no baking recipes; udon+vegetable+egg → "Japanese Style Curry Udon Noodles" as best match; kimchi+egg+tofu → kimchi/tofu-centred dishes surfacing correctly.
+
+- **Algorithm quality pass 3 — diverse pantry focus:**
+  - **Pantry focus multiplier** (inside `score_v2()`): when a user has more than 5 non-staple ingredients, a `pantry_focus` factor rewards recipes that use a large fraction of the user's specific pantry. Formula: `pantry_focus = sqrt(matched / user_n)` when `user_n > 5`, else `1.0`. The `sqrt` exponent provides mild compression — 50% pantry coverage → ×0.71, 20% coverage → ×0.45. A recipe using 3 of 10 diverse ingredients is penalised ~55% relative to a focused-pantry user seeing the same recipe with 3/3 ingredients.
+  - **Design rationale:** existing `coverage_factor` measures matched/recipe_n (recipe-centric); `pantry_focus` measures matched/user_n (user-centric). The two are orthogonal — `coverage_factor` rewards recipes whose ingredients you know; `pantry_focus` rewards recipes that actually use what you brought. No double-counting with IDF (count-based, not IDF-weighted).
+  - **Guard threshold `user_n > 5`:** at 5 or fewer ingredients, the pantry is focused enough that `coverage_factor` already selects correctly. The guard ensures zero behaviour change for typical small-pantry queries.
+  - **Updated scoring formula:** `score = weighted_sum × coverage^1.5 × missing_factor × simplicity_bonus × anchor_boost × pantry_focus`
+- 29 unit tests total (up from 26) — new tests: `test_pantry_focus_diverse_vs_focused`, `test_pantry_focus_small_pantry_not_penalised`, `test_diverse_pantry_prefers_more_matches`.
+
+- **Substitution hints on missing ingredients (commit `d1e7afe`):**
+  - `GET /recipes/:id` now returns `ingredients_raw: [{raw, hint}]` instead of `string[]`
+  - `hint_for(raw)` in `recipes.rs` uses `SUBSTITUTION_HINTS` static table (19 entries) + `word_tokens` from `ai.rs` for word-boundary matching
+  - Covers: broths/stock, soy sauce, sesame oil, cornstarch, soup bases/mixes, mirin, dashi, coconut milk, cream, fish/oyster sauce, worcestershire, dijon, anchovies, capers, rice wine, white wine, curry sauce, scallions
+  - `ShortlistView` missing panel renders each raw ingredient with a dim italic hint below it
+  - `presentRecipe` unwraps `.raw` before sending to backend (backward-compatible)
+- **Streaming shortlist (commit `d1e7afe`):**
+  - `POST /ai/theme-shortlist` converted to SSE using `axum::response::sse`
+  - Emits `event: scores` immediately (~50ms, pure Rust) then `event: themes` after Groq (~1–3s)
+  - Frontend `streamShortlist()` async generator reads the SSE stream, updating recipe cards twice
+  - Handles buffering proxies (Railway Nixpacks nginx) via plain JSON fallback when `data:` lines are absent
+  - `build_shortlist_entries()` helper extracted from handler; `ShortlistEntry` derives `Clone`
+  - Added `futures-util = "0.3"` to Cargo.toml
+
+- **Substitution quality + UX fixes:**
+  - **Groq sub filter** (`backend/src/ai.rs`, `call_groq()`): after parsing Groq's `PresentResponse`, `substitutions` are filtered with `.retain()` to remove any entry where the ingredient is a pantry staple — checked both as a full string and token-by-token via `is_pantry_staple_ai()`. Eliminates hallucinations like "flour → udon" that Groq produces when the user happens to have a noodle ingredient.
+  - **Auto-open missing panel** (`frontend/src/components/cook/ShortlistView.tsx`): featured card now initialises `missingOpen = true` and fires a `useEffect` on mount to immediately fetch `/recipes/:id` for the missing ingredients + static hints. Users see the missing list and substitution hints without any click. Non-featured cards retain their on-click lazy-fetch behaviour.
+  - **Uniform card design** (`frontend/src/components/cook/ShortlistView.tsx`): all shortlist cards use the same compact collapsed layout. First card starts expanded; all others start collapsed. Clicking a card header toggles it open/closed with a CSS `max-height` animation (0→600px). Chevron rotates 180° when expanded. Matched chips, missing ingredient list, match bar, and "Cook this →" button are revealed only on expand — no visual distinction between featured and non-featured cards.
 
 **Remaining:**
-- End-to-end testing of the full happy path and key error paths
+- Re-authenticate Railway (`railway login`) to monitor deployment of commit `d1e7afe`
 - Performance check — ingredient query response time acceptable, no obvious bottlenecks
 - Basic accessibility pass
 - Copy and microcopy review — tone consistent, helper text clear

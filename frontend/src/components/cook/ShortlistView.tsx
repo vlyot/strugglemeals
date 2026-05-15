@@ -1,4 +1,4 @@
-import { useState, useRef } from "react"
+import { useState, useRef, useEffect } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -59,24 +59,13 @@ function RecipeCard({
   userIngredients: string[]
   onCook: () => void
 }) {
-  const matchRatio = entry.ingredient_count > 0 ? entry.match_score / entry.ingredient_count : 1
-  const lowMatch = !featured && matchRatio < 0.4
-
-  const [expanded, setExpanded] = useState(false)
+  const [open, setOpen] = useState(featured)
   const [missingOpen, setMissingOpen] = useState(false)
   const [missingIngredients, setMissingIngredients] = useState<RawIngredient[] | null>(null)
   const [missingLoading, setMissingLoading] = useState(false)
   const fetchedRef = useRef(false)
 
-  const showPanel = featured || expanded
-
-  const handleMissingClick = (e: React.MouseEvent) => {
-    e.stopPropagation()
-    if (missingOpen) {
-      setMissingOpen(false)
-      return
-    }
-    setMissingOpen(true)
+  const fetchMissing = () => {
     if (fetchedRef.current) return
     fetchedRef.current = true
     setMissingLoading(true)
@@ -93,21 +82,32 @@ function RecipeCard({
       .finally(() => setMissingLoading(false))
   }
 
+  // Auto-fetch missing for featured card on mount.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (featured && entry.missing_count > 0) fetchMissing() }, [])
+
+  const handleToggle = () => {
+    const next = !open
+    setOpen(next)
+    if (next) fetchMissing()
+  }
+
+  const handleMissingClick = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setMissingOpen((v) => !v)
+  }
+
   return (
     <div
       className={[
-        "rounded-2xl border p-5 flex flex-col gap-4 transition-colors cursor-pointer",
-        featured
-          ? "border-primary/30 bg-card shadow-sm"
-          : lowMatch
-            ? "border-border/40 bg-card/40 opacity-75"
-            : "border-border bg-card/60",
+        "rounded-2xl border bg-card transition-colors overflow-hidden",
+        open ? "border-primary/30 shadow-sm" : "border-border cursor-pointer hover:border-primary/20",
       ].join(" ")}
-      onPointerEnter={() => !featured && setExpanded(true)}
-      onPointerLeave={() => !featured && setExpanded(false)}
+      onClick={!open ? handleToggle : undefined}
     >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex flex-col gap-1 flex-1 min-w-0">
+      {/* Always-visible header — compact row */}
+      <div className="flex items-center gap-3 px-5 py-4" onClick={open ? handleToggle : undefined} style={{ cursor: "pointer" }}>
+        <div className="flex flex-col gap-0.5 flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             {featured && (
               <span className="text-xs font-semibold tracking-wider uppercase text-primary bg-primary/10 px-2 py-0.5 rounded-full">
@@ -116,100 +116,91 @@ function RecipeCard({
             )}
             <ThemeBadge theme={entry.theme} />
           </div>
-          <h3
-            className={[
-              "font-serif font-light leading-tight text-foreground",
-              featured ? "text-2xl" : "text-xl",
-            ].join(" ")}
-          >
+          <h3 className="font-serif font-light text-xl leading-tight text-foreground truncate">
             {entry.title}
           </h3>
           {entry.reason && (
-            <p className="text-sm text-muted-foreground">{entry.reason}</p>
+            <p className="text-sm text-muted-foreground truncate">{entry.reason}</p>
           )}
         </div>
-        {!featured && (
-          <button
-            type="button"
-            onClick={onCook}
-            disabled={presenting}
-            className="text-muted-foreground hover:text-foreground transition-colors shrink-0 mt-1"
-            aria-label={`Cook ${entry.title}`}
-          >
-            <svg width="18" height="18" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 8l4 4m0 0l-4 4m4-4H3" />
-            </svg>
-          </button>
-        )}
+        {/* Chevron indicator */}
+        <svg
+          width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor"
+          className={["shrink-0 text-muted-foreground transition-transform duration-200", open ? "rotate-180" : ""].join(" ")}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+        </svg>
       </div>
 
-      {/* Ingredient panel */}
-      {showPanel && (
-        <div className="flex flex-col gap-2">
+      {/* Expandable detail panel with CSS max-height animation */}
+      <div
+        className="transition-all duration-300 ease-in-out overflow-hidden"
+        style={{ maxHeight: open ? "600px" : "0px" }}
+      >
+        <div className="flex flex-col gap-3 px-5 pb-5">
           <div className="h-px bg-border/50" />
-          <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Your ingredients</p>
-          <div className="flex flex-wrap gap-1.5">
-            {entry.matched_ingredients.map((ing) => (
-              <span
-                key={ing}
-                className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200"
-              >
-                <span>✓</span> {ing}
-              </span>
-            ))}
-            {entry.missing_count > 0 && (
-              <button
-                type="button"
-                onClick={handleMissingClick}
-                className="inline-flex items-center text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border hover:bg-muted/80 transition-colors"
-              >
-                {missingOpen ? "▲" : "+"}{entry.missing_count} more needed
-              </button>
-            )}
-          </div>
-          {missingOpen && (
-            <div className="flex flex-col gap-1 pl-1">
-              {missingLoading ? (
-                <div className="flex flex-col gap-1">
-                  {[...Array(entry.missing_count)].map((_, i) => (
-                    <Skeleton key={i} className="h-3 w-32 rounded" />
-                  ))}
-                </div>
-              ) : (
-                missingIngredients?.map((item, i) => (
-                  <div key={i} className="flex flex-col">
-                    <span className="text-xs text-muted-foreground">· {item.raw}</span>
-                    {item.hint && (
-                      <span className="text-xs text-muted-foreground/50 pl-3 italic">{item.hint}</span>
-                    )}
-                  </div>
-                ))
+
+          {/* Matched + missing chips */}
+          <div className="flex flex-col gap-2">
+            <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Your ingredients</p>
+            <div className="flex flex-wrap gap-1.5">
+              {entry.matched_ingredients.map((ing) => (
+                <span
+                  key={ing}
+                  className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200"
+                >
+                  <span>✓</span> {ing}
+                </span>
+              ))}
+              {entry.missing_count > 0 && (
+                <button
+                  type="button"
+                  onClick={handleMissingClick}
+                  className="inline-flex items-center text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground border border-border hover:bg-muted/80 transition-colors"
+                >
+                  {missingOpen ? "▲ " : "+ "}{entry.missing_count} more needed
+                </button>
               )}
             </div>
-          )}
-          <p className="text-xs text-muted-foreground">
-            {entry.match_score} of {entry.ingredient_count} matched
-          </p>
+
+            {/* Missing list */}
+            {missingOpen && (
+              <div className="flex flex-col gap-1 pl-1">
+                {missingLoading ? (
+                  <div className="flex flex-col gap-1">
+                    {[...Array(entry.missing_count)].map((_, i) => (
+                      <Skeleton key={i} className="h-3 w-32 rounded" />
+                    ))}
+                  </div>
+                ) : (
+                  missingIngredients?.map((item, i) => (
+                    <div key={i} className="flex flex-col">
+                      <span className="text-xs text-muted-foreground">· {item.raw}</span>
+                      {item.hint && (
+                        <span className="text-xs text-muted-foreground/50 pl-3 italic">{item.hint}</span>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            <p className="text-xs text-muted-foreground">
+              {entry.match_score} of {entry.ingredient_count} matched
+            </p>
+          </div>
+
+          <MatchBar score={entry.match_score} total={entry.ingredient_count} />
+
+          <Button
+            onClick={(e) => { e.stopPropagation(); onCook() }}
+            disabled={presenting}
+            className="w-full bg-primary text-primary-foreground hover:bg-primary/90 h-11 rounded-xl"
+          >
+            {presenting ? "Preparing recipe..." : "Cook this →"}
+          </Button>
         </div>
-      )}
-
-      {featured && <MatchBar score={entry.match_score} total={entry.ingredient_count} />}
-
-      {featured && (
-        <Button
-          onClick={onCook}
-          disabled={presenting}
-          className="w-full bg-primary text-primary-foreground hover:bg-primary/90 h-11 rounded-xl"
-        >
-          {presenting ? "Preparing recipe..." : "Cook this →"}
-        </Button>
-      )}
-
-      {lowMatch && !expanded && (
-        <p className="text-xs text-muted-foreground/70">
-          Missing {entry.missing_count} of {entry.ingredient_count} ingredients
-        </p>
-      )}
+      </div>
     </div>
   )
 }
@@ -236,10 +227,8 @@ function ThemeSection({
     )
   }
 
-  const [featured, ...rest] = entries
-
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
         <span className="text-lg">{meta.icon}</span>
         <div>
@@ -252,18 +241,11 @@ function ThemeSection({
         </div>
       </div>
 
-      <RecipeCard
-        entry={featured}
-        featured
-        presenting={presenting === featured.id}
-        userIngredients={userIngredients}
-        onCook={() => onCook(featured)}
-      />
-      {rest.map((entry) => (
+      {entries.map((entry, i) => (
         <RecipeCard
           key={entry.id}
           entry={entry}
-          featured={false}
+          featured={i === 0}
           presenting={presenting === entry.id}
           userIngredients={userIngredients}
           onCook={() => onCook(entry)}
