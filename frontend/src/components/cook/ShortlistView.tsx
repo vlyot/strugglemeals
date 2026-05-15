@@ -3,7 +3,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import { ThemeBadge } from "./IngredientInput"
-import { fetchRecipeDetail, type ShortlistEntry } from "@/lib/api"
+import { fetchRecipeDetail, type ShortlistEntry, type RawIngredient } from "@/lib/api"
 
 interface Props {
   results: ShortlistEntry[]
@@ -62,7 +62,7 @@ function RecipeCard({
 
   const [expanded, setExpanded] = useState(false)
   const [missingOpen, setMissingOpen] = useState(false)
-  const [missingIngredients, setMissingIngredients] = useState<string[] | null>(null)
+  const [missingIngredients, setMissingIngredients] = useState<RawIngredient[] | null>(null)
   const [missingLoading, setMissingLoading] = useState(false)
   const fetchedRef = useRef(false)
 
@@ -81,8 +81,8 @@ function RecipeCard({
     const userLower = userIngredients.map((u) => u.toLowerCase())
     fetchRecipeDetail(entry.id)
       .then((detail) => {
-        const missing = detail.ingredients_raw.filter((raw) => {
-          const rawLower = raw.toLowerCase()
+        const missing = detail.ingredients_raw.filter((item) => {
+          const rawLower = item.raw.toLowerCase()
           return !userLower.some((u) => rawLower.includes(u) || u.includes(rawLower.split(/\s+/).slice(-1)[0]))
         })
         setMissingIngredients(missing)
@@ -174,8 +174,13 @@ function RecipeCard({
                   ))}
                 </div>
               ) : (
-                missingIngredients?.map((ing, i) => (
-                  <span key={i} className="text-xs text-muted-foreground">· {ing}</span>
+                missingIngredients?.map((item, i) => (
+                  <div key={i} className="flex flex-col">
+                    <span className="text-xs text-muted-foreground">· {item.raw}</span>
+                    {item.hint && (
+                      <span className="text-xs text-muted-foreground/50 pl-3 italic">{item.hint}</span>
+                    )}
+                  </div>
                 ))
               )}
             </div>

@@ -1,4 +1,14 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse,
+    },
+    Json,
+};
+use futures_util::stream::{self, StreamExt};
+use std::convert::Infallible;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -279,7 +289,7 @@ pub struct ShortlistRequest {
     pub cuisine: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct ShortlistEntry {
     pub id: i64,
     pub title: String,
@@ -300,68 +310,15 @@ pub struct ShortlistResponse {
     pub groq_used: bool,
 }
 
-pub async fn theme_shortlist(
-    State(state): State<AppState>,
-    Json(body): Json<ShortlistRequest>,
-) -> impl IntoResponse {
-    if body.ingredients.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "ingredients required" })),
-        );
-    }
-
-    // Resolve qty-enriched ingredient list, falling back to plain names with default qty
-    let user_ings: Vec<IngredientQty> = resolve_user_ings(&body);
-
-    if user_ings.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "no non-pantry ingredients provided" })),
-        );
-    }
-
-    let candidates = match fetch_candidates(&state.sqlite, &body, &user_ings) {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("theme_shortlist SQLite error: {e}");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "error": "database error" })),
-            );
-        }
-    };
-
-    if candidates.is_empty() {
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!(ShortlistResponse { results: vec![], groq_used: false })),
-        );
-    }
-
-    // Try Groq for themed selection; fall back to raw scoring on failure
-    if !state.groq_api_key.is_empty() {
-        match call_groq_shortlist(&state, &candidates, &user_ings).await {
-            Ok(results) => {
-                return (
-                    StatusCode::OK,
-                    Json(serde_json::json!(ShortlistResponse { results, groq_used: true })),
-                );
-            }
-            Err(e) => {
-                tracing::warn!("Groq shortlist failed, using raw fallback: {e}");
-            }
-        }
-    }
-
-    // Fallback: top 6 raw candidates with no theme
-    let fallback: Vec<ShortlistEntry> = candidates
-        .into_iter()
+/// Converts candidates to ShortlistEntries with theme=None (used for the immediate "scores" event).
+fn build_shortlist_entries(candidates: &[CandidateRow]) -> Vec<ShortlistEntry> {
+    candidates
+        .iter()
         .take(6)
         .map(|c| ShortlistEntry {
             missing_count: c.ingredient_count as usize - c.match_count.min(c.ingredient_count as usize),
             id: c.id,
-            title: c.title,
+            title: c.title.clone(),
             theme: None,
             reason: None,
             match_score: c.match_count,
@@ -369,14 +326,71 @@ pub async fn theme_shortlist(
             vegetarian: c.vegetarian,
             vegan: c.vegan,
             gluten_free: c.gluten_free,
-            matched_ingredients: c.matched_ingredients,
+            matched_ingredients: c.matched_ingredients.clone(),
         })
-        .collect();
+        .collect()
+}
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!(ShortlistResponse { results: fallback, groq_used: false })),
-    )
+/// SSE endpoint: emits two events — "scores" immediately (pure Rust), then "themes" after Groq.
+/// The frontend renders recipe cards on the first event and updates theme labels on the second.
+pub async fn theme_shortlist(
+    State(state): State<AppState>,
+    Json(body): Json<ShortlistRequest>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let user_ings = resolve_user_ings(&body);
+
+    // Fetch candidates; emit empty scores on any validation/DB failure.
+    let initial_entries = if body.ingredients.is_empty() || user_ings.is_empty() {
+        vec![]
+    } else {
+        match fetch_candidates(&state.sqlite, &body, &user_ings) {
+            Ok(candidates) if !candidates.is_empty() => build_shortlist_entries(&candidates),
+            Ok(_) => vec![],
+            Err(e) => {
+                tracing::error!("theme_shortlist SQLite error: {e}");
+                vec![]
+            }
+        }
+    };
+
+    // Phase 1: emit scored results immediately (theme = None).
+    let scores_data = serde_json::to_string(&ShortlistResponse {
+        results: initial_entries.clone(),
+        groq_used: false,
+    })
+    .unwrap_or_default();
+    let scores_event = Event::default().event("scores").data(scores_data);
+
+    // Phase 2: call Groq for theme classification, emit result when ready.
+    let has_groq = !state.groq_api_key.is_empty() && !initial_entries.is_empty();
+
+    let themes_stream = stream::once(async move {
+        if !has_groq {
+            return None;
+        }
+        let user_ings2 = resolve_user_ings(&body);
+        let candidates = match fetch_candidates(&state.sqlite, &body, &user_ings2) {
+            Ok(c) if !c.is_empty() => c,
+            _ => return None,
+        };
+        match call_groq_shortlist(&state, &candidates, &user_ings2).await {
+            Ok(results) => {
+                let data = serde_json::to_string(&ShortlistResponse { results, groq_used: true })
+                    .unwrap_or_default();
+                Some(Event::default().event("themes").data(data))
+            }
+            Err(e) => {
+                tracing::warn!("Groq shortlist failed, client keeps scored results: {e}");
+                None
+            }
+        }
+    })
+    .filter_map(|e| async { e });
+
+    let s = stream::once(async move { Ok::<_, Infallible>(scores_event) })
+        .chain(themes_stream.map(|e| Ok::<_, Infallible>(e)));
+
+    Sse::new(s).keep_alive(KeepAlive::default())
 }
 
 // ---------------------------------------------------------------------------
@@ -413,7 +427,7 @@ fn is_pantry_staple_ai(ingredient: &str) -> bool {
 
 /// Split a string into word tokens on whitespace, hyphens, and slashes.
 /// Used for word-boundary matching to avoid false positives like "egg" → "eggplant".
-fn word_tokens(s: &str) -> impl Iterator<Item = &str> {
+pub(crate) fn word_tokens(s: &str) -> impl Iterator<Item = &str> {
     s.split(|c: char| c.is_whitespace() || c == '-' || c == '/')
         .filter(|t| !t.is_empty())
 }

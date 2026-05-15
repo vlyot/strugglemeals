@@ -143,15 +143,58 @@ export interface ShortlistRequest {
   cuisine?: string;
 }
 
-export async function fetchShortlist(payload: ShortlistRequest): Promise<ShortlistResponse> {
+/**
+ * Streams the shortlist via SSE — yields once immediately (scored results, theme=null)
+ * then again after Groq responds (themed results). Falls back gracefully if the proxy
+ * buffers SSE into a single delivery or returns plain JSON.
+ */
+export async function* streamShortlist(
+  payload: ShortlistRequest
+): AsyncGenerator<ShortlistResponse> {
   const res = await fetch(`${API_URL}/ai/theme-shortlist`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
     credentials: "include",
   });
-  if (!res.ok) throw new Error(`fetchShortlist failed: ${res.status}`);
-  return res.json();
+  if (!res.ok || !res.body) throw new Error(`streamShortlist failed: ${res.status}`);
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let yieldedAny = false;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line.startsWith("data:")) {
+        const text = line.slice(5).trim();
+        if (text) { yield JSON.parse(text) as ShortlistResponse; yieldedAny = true; }
+      }
+    }
+  }
+
+  // Flush any remaining buffer (handles single-chunk delivery from buffering proxies)
+  if (buf.trim()) {
+    if (buf.startsWith("data:")) {
+      const text = buf.slice(5).trim();
+      if (text) { yield JSON.parse(text) as ShortlistResponse; yieldedAny = true; }
+    } else if (!yieldedAny) {
+      // Plain JSON fallback — proxy collapsed SSE into a single JSON body
+      try {
+        yield JSON.parse(buf) as ShortlistResponse;
+      } catch { /* ignore malformed */ }
+    }
+  }
+}
+
+export interface RawIngredient {
+  raw: string;
+  hint: string | null;
 }
 
 export interface RecipeDetail {
@@ -162,7 +205,7 @@ export interface RecipeDetail {
   vegetarian: boolean;
   vegan: boolean;
   gluten_free: boolean;
-  ingredients_raw: string[];
+  ingredients_raw: RawIngredient[];
   ingredients_core: string[];
   directions: string[];
 }
@@ -194,7 +237,7 @@ export async function presentRecipe(
       recipe: {
         id: recipe.id,
         title: recipe.title,
-        ingredients_raw: recipe.ingredients_raw,
+        ingredients_raw: recipe.ingredients_raw.map((i) => i.raw),
         ingredients_core: recipe.ingredients_core,
         directions: recipe.directions,
       },

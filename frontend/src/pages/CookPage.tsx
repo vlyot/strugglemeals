@@ -1,6 +1,6 @@
 import { Fragment, useState } from "react"
 import {
-  fetchShortlist,
+  streamShortlist,
   fetchRecipeDetail,
   presentRecipe,
   recordCookSilent,
@@ -89,20 +89,25 @@ export default function CookPage() {
     if (ingredients.length === 0) return
     setInputError(null)
     setShortlistLoading(true)
+    setShortlistResults([])
+    setStep("shortlist")
     try {
-      const data = await fetchShortlist({
+      let first = true
+      for await (const chunk of streamShortlist({
         ingredients: ingredients.map((i) => i.name),
         ingredients_with_qty: ingredients.map((i) => ({ name: i.name, qty: i.qty })),
         vegetarian: filters.vegetarian || undefined,
         vegan: filters.vegan || undefined,
         gluten_free: filters.gluten_free || undefined,
         cuisine: cuisine || undefined,
-      })
-      setShortlistResults(data.results)
-      setStep("shortlist")
+      })) {
+        setShortlistResults(chunk.results)
+        if (first) { setShortlistLoading(false); first = false }
+      }
     } catch (e) {
-      console.error("fetchShortlist error:", e)
+      console.error("streamShortlist error:", e)
       setInputError("Something went wrong finding recipes. Please try again.")
+      setStep("input")
     } finally {
       setShortlistLoading(false)
     }

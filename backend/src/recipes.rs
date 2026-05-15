@@ -8,6 +8,57 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::SqlitePool;
+use crate::ai::word_tokens;
+
+// ---------------------------------------------------------------------------
+// Substitution hints
+// ---------------------------------------------------------------------------
+
+/// Trigger tokens → hint text. Evaluated in order; first match wins.
+/// Each entry's first element is a list of tokens — if ANY token appears
+/// in the raw ingredient string, the hint is returned.
+static SUBSTITUTION_HINTS: &[(&[&str], &str)] = &[
+    (&["broth", "stock"],                        "or any stock, or water + bouillon"),
+    (&["soy", "sauce"],                          "or tamari, or a pinch of salt"),
+    (&["sesame", "oil"],                         "or any neutral oil"),
+    (&["cornstarch", "cornflour"],               "thickener — can skip or use flour"),
+    (&["base", "mix"],                           "or any broth or stock"),
+    (&["curry", "sauce"],                        "or curry powder + water/coconut milk"),
+    (&["scallion", "scallions", "chive", "chives"], "or any onion"),
+    (&["mirin"],                                 "or 1 tsp sugar + 1 tsp water"),
+    (&["dashi"],                                 "or any light stock"),
+    (&["coconut", "milk"],                       "or any creamy liquid"),
+    (&["cream"],                                 "or milk + butter, or coconut cream"),
+    (&["fish", "sauce"],                         "or soy sauce + a pinch of sugar"),
+    (&["oyster", "sauce"],                       "or soy sauce + a pinch of sugar"),
+    (&["worcestershire"],                        "or soy sauce"),
+    (&["dijon"],                                 "or any mustard"),
+    (&["anchovy", "anchovies"],                  "or a pinch of salt"),
+    (&["capers"],                                "or chopped green olives"),
+    (&["rice", "wine"],                          "or white wine vinegar, or lemon juice"),
+    (&["white", "wine"],                         "or chicken broth + lemon juice"),
+];
+
+/// Returns the first matching substitution hint for a raw ingredient string,
+/// or `None` if no hint applies. Uses word-boundary token matching.
+pub(crate) fn hint_for(raw: &str) -> Option<&'static str> {
+    let raw_lower = raw.to_lowercase();
+    let toks: Vec<&str> = word_tokens(&raw_lower).collect();
+    SUBSTITUTION_HINTS.iter().find_map(|(triggers, hint)| {
+        if triggers.iter().any(|t| toks.contains(t)) {
+            Some(*hint)
+        } else {
+            None
+        }
+    })
+}
+
+/// A raw ingredient string paired with an optional substitution hint.
+#[derive(Debug, Serialize)]
+pub struct RawIngredient {
+    pub raw: String,
+    pub hint: Option<&'static str>,
+}
 
 // ---------------------------------------------------------------------------
 // Models
@@ -35,7 +86,7 @@ pub struct RecipeDetail {
     pub vegetarian: bool,
     pub vegan: bool,
     pub gluten_free: bool,
-    pub ingredients_raw: Vec<String>,
+    pub ingredients_raw: Vec<RawIngredient>,
     pub ingredients_core: Vec<String>,
     pub directions: Vec<String>,
 }
@@ -267,6 +318,11 @@ pub async fn get_one(
                     .unwrap_or_default()
             };
 
+            let ingredients_raw = parse_json_arr(&raw_raw)
+                .into_iter()
+                .map(|r| RawIngredient { hint: hint_for(&r), raw: r })
+                .collect();
+
             let detail = RecipeDetail {
                 id,
                 title,
@@ -275,7 +331,7 @@ pub async fn get_one(
                 vegetarian,
                 vegan,
                 gluten_free,
-                ingredients_raw: parse_json_arr(&raw_raw),
+                ingredients_raw,
                 ingredients_core: parse_json_arr(&core_raw),
                 directions: parse_json_arr(&dir_raw),
             };
@@ -295,3 +351,4 @@ pub async fn get_one(
         }
     }
 }
+
