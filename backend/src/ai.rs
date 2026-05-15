@@ -383,6 +383,7 @@ pub async fn theme_shortlist(
 
 fn is_pantry_staple_ai(ingredient: &str) -> bool {
     const STAPLES: &[&str] = &[
+        // Fats & oils
         "salt", "black pepper", "white pepper", "pepper", "olive oil",
         "vegetable oil", "canola oil", "oil", "butter", "water", "sugar",
         "brown sugar", "flour", "all-purpose flour", "baking soda",
@@ -390,6 +391,16 @@ fn is_pantry_staple_ai(ingredient: &str) -> bool {
         "onion powder", "paprika", "cumin", "oregano", "thyme", "basil",
         "cayenne", "red pepper flakes", "cinnamon", "nutmeg", "bay leaves",
         "bay leaf", "cooking spray", "nonstick cooking spray", "shortening",
+        // Condiments & sauces (very common, shouldn't drive recipe selection)
+        "soy sauce", "fish sauce", "oyster sauce", "hoisin sauce",
+        "worcestershire sauce", "hot sauce", "tabasco", "sriracha",
+        "ketchup", "mustard", "mayonnaise", "vinegar", "rice vinegar",
+        "apple cider vinegar", "white vinegar", "balsamic vinegar",
+        "sesame oil", "sesame seeds", "cornstarch", "corn starch",
+        "tomato paste", "tomato sauce", "chicken broth", "beef broth",
+        "vegetable broth", "chicken stock", "beef stock", "vegetable stock",
+        "broth", "stock", "heavy cream", "heavy whipping cream",
+        "milk", "lemon juice", "lime juice",
     ];
     STAPLES.contains(&ingredient)
 }
@@ -522,42 +533,45 @@ fn fetch_candidates(
 ) -> Result<Vec<CandidateRow>, String> {
     let conn = pool.get().map_err(|e| e.to_string())?;
 
-    // Build EXISTS clause per ingredient — OR'd together so we get any recipe
-    // containing at least one of the user's ingredients.
-    let exists_clauses: Vec<String> = user_ings
-        .iter()
-        .map(|_| {
-            "EXISTS (SELECT 1 FROM json_each(ingredients_core) WHERE LOWER(value) LIKE ?)".to_string()
-        })
+    let n = user_ings.len();
+
+    // One EXISTS clause per ingredient (for WHERE and ORDER BY).
+    // We duplicate the params: first set for WHERE OR'd clauses, second set for ORDER BY sum.
+    let exists_clause =
+        "EXISTS (SELECT 1 FROM json_each(ingredients_core) WHERE LOWER(value) LIKE ?)";
+    let where_parts: Vec<&str> = vec![exists_clause; n];
+    let order_parts: Vec<String> = (0..n)
+        .map(|_| format!("CASE WHEN {exists_clause} THEN 1 ELSE 0 END"))
         .collect();
 
-    let mut sql = format!(
+    let mut filter_sql = String::new();
+    if body.vegetarian == Some(true) { filter_sql.push_str(" AND vegetarian = 1"); }
+    if body.vegan == Some(true)      { filter_sql.push_str(" AND vegan = 1"); }
+    if body.gluten_free == Some(true){ filter_sql.push_str(" AND gluten_free = 1"); }
+
+    // ORDER BY sum of matches DESC so high-overlap recipes survive the LIMIT 500 cut.
+    // Params: like_params (for WHERE) ++ like_params (for ORDER BY).
+    let sql = format!(
         "SELECT id, title, ingredient_count, vegetarian, vegan, gluten_free, \
          ingredients_core, directions \
-         FROM recipes WHERE ({})",
-        exists_clauses.join(" OR ")
+         FROM recipes WHERE ({}){} ORDER BY ({}) DESC LIMIT 500",
+        where_parts.join(" OR "),
+        filter_sql,
+        order_parts.join(" + "),
     );
-
-    if body.vegetarian == Some(true) {
-        sql.push_str(" AND vegetarian = 1");
-    }
-    if body.vegan == Some(true) {
-        sql.push_str(" AND vegan = 1");
-    }
-    if body.gluten_free == Some(true) {
-        sql.push_str(" AND gluten_free = 1");
-    }
-    sql.push_str(" LIMIT 500");
 
     let like_params: Vec<String> = user_ings
         .iter()
         .map(|i| format!("%{}%", i.name))
         .collect();
 
+    // Params doubled: once for WHERE, once for ORDER BY CASE expressions.
+    let all_params: Vec<&String> = like_params.iter().chain(like_params.iter()).collect();
+
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
     let mut rows: Vec<CandidateRow> = stmt
-        .query_map(rusqlite::params_from_iter(like_params.iter()), |row| {
+        .query_map(rusqlite::params_from_iter(all_params.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
@@ -575,28 +589,7 @@ fn fetch_candidates(
             let ingredients_core = parse_json_str_array(&core_raw);
             let directions = parse_json_str_array(&dir_raw);
             let (score, match_count) = score_v2(user_ings, &ingredients_core, &title);
-
-            // Apply cuisine soft boost (20%) if user specified a cuisine preference
-            let score = if let Some(ref cuisine_pref) = body.cuisine {
-                // cuisine column not in SELECT — skip cuisine boost here; irrelevant to correctness
-                let _ = cuisine_pref;
-                score
-            } else {
-                score
-            };
-
-            CandidateRow {
-                id,
-                title,
-                ingredient_count,
-                vegetarian,
-                vegan,
-                gluten_free,
-                ingredients_core,
-                directions,
-                score,
-                match_count,
-            }
+            CandidateRow { id, title, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count }
         })
         .filter(|r| r.match_count > 0)
         .collect();
@@ -609,11 +602,12 @@ fn fetch_candidates(
     });
     rows.truncate(20);
 
-    // Relaxation: if fewer than 3 strict matches, lower bar to top 5 by score
+    // Relaxation: if fewer than 3 results, return top 5 without match_count filter
     if rows.len() < 3 {
+        let all_params2: Vec<&String> = like_params.iter().chain(like_params.iter()).collect();
         let mut stmt2 = conn.prepare(&sql).map_err(|e| e.to_string())?;
         let mut relaxed: Vec<CandidateRow> = stmt2
-            .query_map(rusqlite::params_from_iter(like_params.iter()), |row| {
+            .query_map(rusqlite::params_from_iter(all_params2.iter()), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
