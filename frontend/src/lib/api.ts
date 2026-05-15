@@ -121,6 +121,7 @@ export interface ShortlistEntry {
   vegetarian: boolean;
   vegan: boolean;
   gluten_free: boolean;
+  matched_ingredients: string[];
 }
 
 export interface ShortlistResponse {

@@ -291,6 +291,7 @@ pub struct ShortlistEntry {
     pub vegetarian: bool,
     pub vegan: bool,
     pub gluten_free: bool,
+    pub matched_ingredients: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -363,11 +364,12 @@ pub async fn theme_shortlist(
             title: c.title,
             theme: None,
             reason: None,
-            match_score: (c.score.round() as usize).min(c.ingredient_count as usize),
+            match_score: c.match_count,
             ingredient_count: c.ingredient_count,
             vegetarian: c.vegetarian,
             vegan: c.vegan,
             gluten_free: c.gluten_free,
+            matched_ingredients: c.matched_ingredients,
         })
         .collect();
 
@@ -438,15 +440,15 @@ fn qty_weight(qty: &str) -> f64 {
 }
 
 /// Score a recipe against the user's ingredients.
-/// Returns (weighted_score, match_count).
-fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) -> (f64, usize) {
+/// Returns (weighted_score, matched_ingredient_names).
+fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) -> (f64, Vec<String>) {
     if recipe_core.is_empty() {
-        return (0.0, 0);
+        return (0.0, vec![]);
     }
     let recipe_lower: Vec<String> = recipe_core.iter().map(|s| s.to_lowercase()).collect();
     let title_lower = title.to_lowercase();
 
-    let mut matched = 0usize;
+    let mut matched_names: Vec<String> = Vec::new();
     let mut weighted_sum = 0.0f64;
 
     for ui in user_ings {
@@ -457,15 +459,16 @@ fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) ->
         if !hits {
             continue;
         }
-        matched += 1;
+        matched_names.push(ui.name.clone());
         let idf = rarity_idf(&name);
         let qty = qty_weight(&ui.qty);
         let title_bonus = if title_lower.contains(name.as_str()) { 5.0 } else { 0.0 };
         weighted_sum += idf * qty + title_bonus;
     }
 
+    let matched = matched_names.len();
     if matched == 0 {
-        return (0.0, 0);
+        return (0.0, vec![]);
     }
 
     let n = recipe_core.len() as f64;
@@ -475,7 +478,7 @@ fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) ->
     let missing_ratio = (n - matched as f64) / n;
     let missing_factor = 1.0 - (missing_ratio.powi(2) * 0.5);
 
-    (weighted_sum * coverage_factor * missing_factor, matched)
+    (weighted_sum * coverage_factor * missing_factor, matched_names)
 }
 
 // ---------------------------------------------------------------------------
@@ -493,6 +496,7 @@ struct CandidateRow {
     directions: Vec<String>,
     score: f64,
     match_count: usize,
+    matched_ingredients: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -588,8 +592,9 @@ fn fetch_candidates(
         .map(|(id, title, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
             let ingredients_core = parse_json_str_array(&core_raw);
             let directions = parse_json_str_array(&dir_raw);
-            let (score, match_count) = score_v2(user_ings, &ingredients_core, &title);
-            CandidateRow { id, title, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count }
+            let (score, matched_ingredients) = score_v2(user_ings, &ingredients_core, &title);
+            let match_count = matched_ingredients.len();
+            CandidateRow { id, title, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count, matched_ingredients }
         })
         .filter(|r| r.match_count > 0)
         .collect();
@@ -624,8 +629,9 @@ fn fetch_candidates(
             .map(|(id, title, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
                 let ingredients_core = parse_json_str_array(&core_raw);
                 let directions = parse_json_str_array(&dir_raw);
-                let (score, match_count) = score_v2(user_ings, &ingredients_core, &title);
-                CandidateRow { id, title, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count }
+                let (score, matched_ingredients) = score_v2(user_ings, &ingredients_core, &title);
+                let match_count = matched_ingredients.len();
+                CandidateRow { id, title, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count, matched_ingredients }
             })
             .collect();
         relaxed.sort_unstable_by(|a, b| {
@@ -692,9 +698,10 @@ Theme rules:
 
 Selection priority:
 1. Prefer recipes that feature the user's RAREST or most specific ingredients (e.g. if user has udon noodles, pick udon-centred dishes over generic noodle dishes)
-2. Prefer recipes where "plenty" ingredients are central to the dish, not garnishes
-3. Minimise missing ingredients — prefer recipes where the user already has most of what's needed
-4. Use step count and first step wording to judge Quick vs Filling accurately
+2. "plenty" ingredients MUST be a primary component of the dish — not just used as a garnish or sauce
+3. HARD RULE: if any ingredient is marked "plenty", at least one selected recipe per theme must contain that ingredient. Do not fill a theme slot with a recipe that only matches on common/generic ingredients (eggs, cheese, butter) when a more specific ingredient (udon, kimchi, tofu) is available
+4. Minimise missing ingredients — prefer recipes where the user already has most of what's needed
+5. Use step count and first step wording to judge Quick vs Filling accurately
 
 Return ONLY valid JSON — no markdown fences, no commentary:
 {
@@ -794,6 +801,7 @@ Rules:
                 vegetarian: c.vegetarian,
                 vegan: c.vegan,
                 gluten_free: c.gluten_free,
+                matched_ingredients: c.matched_ingredients.clone(),
             });
             *count += 1;
             seen_ids.insert(id);
@@ -844,7 +852,7 @@ mod scoring_tests {
 
         // Udon Noodle Soup: 4 ingredients, matches udon + egg, title contains "udon"
         let udon_core = vec!["udon".to_string(), "dashi".to_string(), "scallion".to_string(), "egg".to_string()];
-        let (udon_score, udon_count) = score_v2(&user, &udon_core, "Udon Noodle Soup");
+        let (udon_score, udon_matched) = score_v2(&user, &udon_core, "Udon Noodle Soup");
 
         // Barbecue Turkey Loaf: 8 ingredients, only egg matches, no title match
         let turkey_core = vec![
@@ -852,10 +860,12 @@ mod scoring_tests {
             "barbecue sauce".to_string(), "american cheese".to_string(), "ground turkey".to_string(),
             "egg".to_string(), "breadcrumbs".to_string(),
         ];
-        let (turkey_score, turkey_count) = score_v2(&user, &turkey_core, "Barbecue Turkey Loaf");
+        let (turkey_score, turkey_matched) = score_v2(&user, &turkey_core, "Barbecue Turkey Loaf");
 
-        assert!(udon_count >= 2, "udon soup should match at least 2 ingredients");
-        assert_eq!(turkey_count, 1, "turkey loaf should only match egg");
+        assert!(udon_matched.len() >= 2, "udon soup should match at least 2 ingredients");
+        assert_eq!(turkey_matched.len(), 1, "turkey loaf should only match egg");
+        let _udon_count = udon_matched.len();
+        let _turkey_count = turkey_matched.len();
         assert!(
             udon_score > turkey_score * 10.0,
             "udon soup ({udon_score:.2}) should score at least 10x turkey loaf ({turkey_score:.2})"
@@ -890,8 +900,8 @@ mod scoring_tests {
             "g".to_string(), "h".to_string(), "i".to_string(),
         ];
 
-        let (small_score, _) = score_v2(&user, &small, "Test");
-        let (large_score, _) = score_v2(&user, &large, "Test");
+        let (small_score, _small_m) = score_v2(&user, &small, "Test");
+        let (large_score, _large_m) = score_v2(&user, &large, "Test");
 
         assert!(small_score > large_score, "smaller recipe with same match count should score higher");
     }
@@ -900,16 +910,16 @@ mod scoring_tests {
     fn test_score_v2_no_match() {
         let user = vec![ing("udon", "1 qty")];
         let core = vec!["chicken".to_string(), "rice".to_string()];
-        let (score, count) = score_v2(&user, &core, "Chicken Rice");
-        assert_eq!(count, 0);
+        let (score, matched) = score_v2(&user, &core, "Chicken Rice");
+        assert_eq!(matched.len(), 0);
         assert_eq!(score, 0.0);
     }
 
     #[test]
     fn test_score_v2_empty_recipe() {
         let user = vec![ing("udon", "1 qty")];
-        let (score, count) = score_v2(&user, &[], "Empty");
-        assert_eq!(count, 0);
+        let (score, matched) = score_v2(&user, &[], "Empty");
+        assert_eq!(matched.len(), 0);
         assert_eq!(score, 0.0);
     }
 

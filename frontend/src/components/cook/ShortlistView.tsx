@@ -147,7 +147,7 @@ function RecipeCard({
           <div className="h-px bg-border/50" />
           <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Your ingredients</p>
           <div className="flex flex-wrap gap-1.5">
-            {userIngredients.map((ing) => (
+            {entry.matched_ingredients.map((ing) => (
               <span
                 key={ing}
                 className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200"
