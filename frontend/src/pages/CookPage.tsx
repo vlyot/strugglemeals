@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react"
+import { Fragment, useState, useEffect, useRef } from "react"
 import {
   streamShortlist,
   fetchRecipeDetail,
@@ -38,8 +38,26 @@ export default function CookPage() {
   const [step, setStep] = useState<Step>("method")
   const [defaultTab, setDefaultTab] = useState<"text" | "photo">("text")
   const [shortlistLoading, setShortlistLoading] = useState(false)
+  const [shortlistProgress, setShortlistProgress] = useState(0)
   const [shortlistResults, setShortlistResults] = useState<ShortlistEntry[]>([])
   const [inputError, setInputError] = useState<string | null>(null)
+  const progressTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Smoothly tick progress toward a target value, never exceeding it
+  const tickProgressTo = (target: number) => {
+    if (progressTimerRef.current) clearInterval(progressTimerRef.current)
+    progressTimerRef.current = setInterval(() => {
+      setShortlistProgress((prev) => {
+        if (prev >= target) {
+          clearInterval(progressTimerRef.current!)
+          return prev
+        }
+        return prev + Math.max(1, Math.floor((target - prev) * 0.12))
+      })
+    }, 80)
+  }
+
+  useEffect(() => () => { if (progressTimerRef.current) clearInterval(progressTimerRef.current) }, [])
 
   // Modal state
   const [modalOpen, setModalOpen] = useState(false)
@@ -89,8 +107,10 @@ export default function CookPage() {
     if (ingredients.length === 0) return
     setInputError(null)
     setShortlistLoading(true)
+    setShortlistProgress(5)
     setShortlistResults([])
     setStep("shortlist")
+    tickProgressTo(65)
     try {
       let first = true
       for await (const chunk of streamShortlist({
@@ -102,13 +122,26 @@ export default function CookPage() {
         cuisine: cuisine || undefined,
       })) {
         setShortlistResults(chunk.results)
-        if (first) { setShortlistLoading(false); first = false }
+        if (first) {
+          // Scores arrived — snap to 70, then crawl toward 90 while Groq runs
+          if (progressTimerRef.current) clearInterval(progressTimerRef.current)
+          setShortlistProgress(70)
+          tickProgressTo(90)
+          setShortlistLoading(false)
+          first = false
+        } else {
+          // Themes arrived — complete
+          if (progressTimerRef.current) clearInterval(progressTimerRef.current)
+          setShortlistProgress(100)
+        }
       }
     } catch (e) {
       console.error("streamShortlist error:", e)
       setInputError("Something went wrong finding recipes. Please try again.")
       setStep("input")
     } finally {
+      if (progressTimerRef.current) clearInterval(progressTimerRef.current)
+      setShortlistProgress(100)
       setShortlistLoading(false)
     }
   }
@@ -142,6 +175,7 @@ export default function CookPage() {
   const handleBack = () => {
     setStep("input")
     setShortlistResults([])
+    setShortlistProgress(0)
   }
 
   const handleModalClose = () => {
@@ -249,6 +283,7 @@ export default function CookPage() {
             <ShortlistView
               results={shortlistResults}
               loading={shortlistLoading}
+              progress={shortlistProgress}
               presenting={presenting}
               userIngredients={ingredients.map((i) => i.name)}
               onBack={handleBack}

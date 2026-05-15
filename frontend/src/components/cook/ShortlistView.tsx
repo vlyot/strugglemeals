@@ -2,12 +2,14 @@ import { useState, useRef } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
+import { Progress } from "@/components/ui/progress"
 import { ThemeBadge } from "./IngredientInput"
 import { fetchRecipeDetail, type ShortlistEntry, type RawIngredient } from "@/lib/api"
 
 interface Props {
   results: ShortlistEntry[]
   loading: boolean
+  progress: number
   presenting: number | null
   userIngredients: string[]
   onBack: () => void
@@ -271,7 +273,7 @@ function ThemeSection({
   )
 }
 
-export function ShortlistView({ results, loading, presenting, userIngredients, onBack, onCook }: Props) {
+export function ShortlistView({ results, loading, progress, presenting, userIngredients, onBack, onCook }: Props) {
   // Determine default tab (first theme that has results)
   const byTheme = (theme: Theme) =>
     results.filter((r) => r.theme === theme)
@@ -279,9 +281,22 @@ export function ShortlistView({ results, loading, presenting, userIngredients, o
   const defaultTab =
     THEMES.find((t) => byTheme(t).length > 0) ?? "Filling"
 
+  const showProgress = progress > 0 && progress < 100
+
   if (loading) {
     return (
       <div className="flex flex-col gap-4 pt-2">
+        {showProgress && (
+          <div className="flex flex-col gap-1.5">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-muted-foreground">
+                {progress < 70 ? "Searching recipes…" : "Picking the best matches…"}
+              </p>
+              <p className="text-xs text-muted-foreground tabular-nums">{progress}%</p>
+            </div>
+            <Progress value={progress} className="h-1.5" />
+          </div>
+        )}
         <Skeleton className="h-6 w-40 rounded-lg" />
         <Skeleton className="h-36 rounded-2xl" />
         <Skeleton className="h-36 rounded-2xl" />
@@ -306,6 +321,17 @@ export function ShortlistView({ results, loading, presenting, userIngredients, o
 
   return (
     <div className="flex flex-col gap-5">
+      {/* Progress bar — visible while themes are still loading after scores arrived */}
+      {showProgress && (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center justify-between">
+            <p className="text-xs text-muted-foreground">Picking the best matches…</p>
+            <p className="text-xs text-muted-foreground tabular-nums">{progress}%</p>
+          </div>
+          <Progress value={progress} className="h-1.5" />
+        </div>
+      )}
+
       {/* Back + title */}
       <div className="flex items-center gap-3">
         <button
