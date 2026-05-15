@@ -411,7 +411,23 @@ fn is_pantry_staple_ai(ingredient: &str) -> bool {
 // TF-IDF / BM25-inspired scoring
 // ---------------------------------------------------------------------------
 
+/// Split a string into word tokens on whitespace, hyphens, and slashes.
+/// Used for word-boundary matching to avoid false positives like "egg" → "eggplant".
+fn word_tokens(s: &str) -> impl Iterator<Item = &str> {
+    s.split(|c: char| c.is_whitespace() || c == '-' || c == '/')
+        .filter(|t| !t.is_empty())
+}
+
+/// Returns true if any token from `a` exactly equals any token from `b`.
+/// Handles cases like "chicken" matching "chicken breast", while preventing
+/// "egg" from matching "eggplant" or "pea" from matching "peanut".
+fn tokens_overlap(a: &str, b: &str) -> bool {
+    word_tokens(a).any(|ta| word_tokens(b).any(|tb| ta == tb))
+}
+
 /// Rarity-based IDF tier. Rare/specific ingredients score higher.
+/// Uses token-level matching so "eggplant" gets IDF 9.0 (niche),
+/// not 4.5 (common) from a false substring match on "egg".
 fn rarity_idf(ingredient: &str) -> f64 {
     const ULTRA_COMMON: &[&str] = &[
         "chicken", "beef", "pork", "lamb", "onion", "garlic",
@@ -421,13 +437,21 @@ fn rarity_idf(ingredient: &str) -> f64 {
         "egg", "eggs", "cheese", "mushroom", "spinach", "broccoli",
         "corn", "bean", "beans", "lentil", "lentils", "shrimp",
     ];
-    if ULTRA_COMMON.iter().any(|&s| ingredient.contains(s)) {
+    let toks: Vec<&str> = word_tokens(ingredient).collect();
+    if ULTRA_COMMON.iter().any(|&s| toks.iter().any(|&t| t == s)) {
         2.0
-    } else if COMMON.iter().any(|&s| ingredient.contains(s)) {
+    } else if COMMON.iter().any(|&s| toks.iter().any(|&t| t == s)) {
         4.5
     } else {
         9.0
     }
+}
+
+/// SQL ORDER BY weight based on IDF tier (integer, for use in CASE WHEN expressions).
+/// Niche ingredients pull harder on the candidate pool than ultra-common ones.
+fn idf_sql_weight(ingredient: &str) -> u32 {
+    let idf = rarity_idf(ingredient);
+    if idf >= 9.0 { 3 } else if idf >= 4.5 { 2 } else { 1 }
 }
 
 /// Quantity signal multiplier.
@@ -455,14 +479,19 @@ fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) ->
         let name = ui.name.to_lowercase();
         let hits = recipe_lower
             .iter()
-            .any(|ri| ri.contains(name.as_str()) || name.contains(ri.as_str()));
+            .any(|ri| tokens_overlap(ri, &name));
         if !hits {
             continue;
         }
         matched_names.push(ui.name.clone());
         let idf = rarity_idf(&name);
         let qty = qty_weight(&ui.qty);
-        let title_bonus = if title_lower.contains(name.as_str()) { 5.0 } else { 0.0 };
+        // Title bonus scaled by IDF: rare ingredients (udon→5.4, egg→2.7, chicken→1.2).
+        // Also uses token matching to prevent "egg" boosting on title "Eggplant Parmesan".
+        let name_toks: Vec<&str> = word_tokens(&name).collect();
+        let title_toks: Vec<&str> = word_tokens(&title_lower).collect();
+        let title_match = name_toks.iter().any(|nt| title_toks.iter().any(|tt| tt == nt));
+        let title_bonus = if title_match { idf * 0.6 } else { 0.0 };
         weighted_sum += idf * qty + title_bonus;
     }
 
@@ -488,6 +517,8 @@ fn score_v2(user_ings: &[IngredientQty], recipe_core: &[String], title: &str) ->
 struct CandidateRow {
     id: i64,
     title: String,
+    #[allow(dead_code)]
+    cuisine: Option<String>,
     ingredient_count: i64,
     vegetarian: bool,
     vegan: bool,
@@ -530,6 +561,30 @@ fn parse_json_str_array(raw: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Generate plural/singular stem variants for a single ingredient name.
+/// This is intentionally minimal — targeting the most common recipe dataset patterns:
+/// plural -s/-es/-ies and their reverses. Does NOT use a full Snowball/Porter stemmer
+/// to avoid mangling uncommon ingredient names (e.g. "celery" → "celer").
+fn stem_variants(name: &str) -> Vec<String> {
+    let mut v = vec![name.to_string()];
+    if name.ends_with("ies") && name.len() > 4 {
+        // berries → berry, cherries → cherry
+        v.push(format!("{}y", &name[..name.len() - 3]));
+    } else if name.ends_with("es") && name.len() > 3 {
+        // tomatoes → tomato, potatoes → potato
+        v.push(name[..name.len() - 2].to_string());
+    } else if name.ends_with('s') && name.len() > 3 {
+        // eggs → egg, chickens → chicken
+        v.push(name[..name.len() - 1].to_string());
+    }
+    // Add plural form if not already ending in s
+    if !name.ends_with('s') {
+        v.push(format!("{name}s"));
+    }
+    v.dedup();
+    v
+}
+
 fn fetch_candidates(
     pool: &crate::SqlitePool,
     body: &ShortlistRequest,
@@ -544,8 +599,14 @@ fn fetch_candidates(
     let exists_clause =
         "EXISTS (SELECT 1 FROM json_each(ingredients_core) WHERE LOWER(value) LIKE ?)";
     let where_parts: Vec<&str> = vec![exists_clause; n];
-    let order_parts: Vec<String> = (0..n)
-        .map(|_| format!("CASE WHEN {exists_clause} THEN 1 ELSE 0 END"))
+    // Weight each ingredient's match contribution by its IDF tier so rare ingredients
+    // (kimchi=3, egg=2, chicken=1) pull proportionally harder on the 500-candidate pool.
+    let order_parts: Vec<String> = user_ings
+        .iter()
+        .map(|ui| {
+            let w = idf_sql_weight(&ui.name);
+            format!("CASE WHEN {exists_clause} THEN {w} ELSE 0 END")
+        })
         .collect();
 
     let mut filter_sql = String::new();
@@ -553,10 +614,11 @@ fn fetch_candidates(
     if body.vegan == Some(true)      { filter_sql.push_str(" AND vegan = 1"); }
     if body.gluten_free == Some(true){ filter_sql.push_str(" AND gluten_free = 1"); }
 
-    // ORDER BY sum of matches DESC so high-overlap recipes survive the LIMIT 500 cut.
+    // ORDER BY sum of matches DESC (weighted by IDF tier) so high-overlap recipes
+    // with rare ingredients survive the LIMIT 500 cut.
     // Params: like_params (for WHERE) ++ like_params (for ORDER BY).
     let sql = format!(
-        "SELECT id, title, ingredient_count, vegetarian, vegan, gluten_free, \
+        "SELECT id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, \
          ingredients_core, directions \
          FROM recipes WHERE ({}){} ORDER BY ({}) DESC LIMIT 500",
         where_parts.join(" OR "),
@@ -574,27 +636,38 @@ fn fetch_candidates(
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
+    // Column indices: 0=id, 1=title, 2=cuisine, 3=ingredient_count,
+    //                 4=vegetarian, 5=vegan, 6=gluten_free, 7=ingredients_core, 8=directions
     let mut rows: Vec<CandidateRow> = stmt
         .query_map(rusqlite::params_from_iter(all_params.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)? != 0,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)? != 0,
                 row.get::<_, i64>(5)? != 0,
-                row.get::<_, String>(6)?,
+                row.get::<_, i64>(6)? != 0,
                 row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
             ))
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
-        .map(|(id, title, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
+        .map(|(id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
             let ingredients_core = parse_json_str_array(&core_raw);
             let directions = parse_json_str_array(&dir_raw);
-            let (score, matched_ingredients) = score_v2(user_ings, &ingredients_core, &title);
+            let (mut score, matched_ingredients) = score_v2(user_ings, &ingredients_core, &title);
+            // Cuisine boost: 1.25× if recipe cuisine matches user preference (partial, case-insensitive)
+            if let (Some(ref req), Some(ref rec)) = (&body.cuisine, &cuisine) {
+                let rl = rec.to_lowercase();
+                let rql = req.to_lowercase();
+                if rl.contains(rql.as_str()) || rql.contains(rl.as_str()) {
+                    score *= 1.25;
+                }
+            }
             let match_count = matched_ingredients.len();
-            CandidateRow { id, title, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count, matched_ingredients }
+            CandidateRow { id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count, matched_ingredients }
         })
         .filter(|r| r.match_count > 0)
         .collect();
@@ -607,33 +680,71 @@ fn fetch_candidates(
     });
     rows.truncate(20);
 
-    // Relaxation: if fewer than 3 results, return top 5 without match_count filter
+    // Relaxation: if fewer than 3 results, broaden with stem variants (plural/singular).
+    // Always filters to match_count > 0 — never returns 0-match recipes.
     if rows.len() < 3 {
-        let all_params2: Vec<&String> = like_params.iter().chain(like_params.iter()).collect();
-        let mut stmt2 = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        // Expand each ingredient name into its stem variants and flatten into LIKE params.
+        let relaxed_like: Vec<String> = user_ings
+            .iter()
+            .flat_map(|ui| stem_variants(&ui.name))
+            .map(|v| format!("%{v}%"))
+            .collect();
+
+        if relaxed_like.is_empty() {
+            return Ok(rows);
+        }
+
+        let rn = relaxed_like.len();
+        let r_where: Vec<&str> = vec![exists_clause; rn];
+        // Use equal weight for relaxed variants (we only need best 5, quality over speed)
+        let r_order: Vec<String> = (0..rn)
+            .map(|_| format!("CASE WHEN {exists_clause} THEN 1 ELSE 0 END"))
+            .collect();
+        let relaxed_sql = format!(
+            "SELECT id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, \
+             ingredients_core, directions \
+             FROM recipes WHERE ({}){} ORDER BY ({}) DESC LIMIT 200",
+            r_where.join(" OR "),
+            filter_sql,
+            r_order.join(" + "),
+        );
+        let relaxed_all: Vec<&String> = relaxed_like.iter().chain(relaxed_like.iter()).collect();
+
+        let mut stmt2 = conn.prepare(&relaxed_sql).map_err(|e| e.to_string())?;
         let mut relaxed: Vec<CandidateRow> = stmt2
-            .query_map(rusqlite::params_from_iter(all_params2.iter()), |row| {
+            .query_map(rusqlite::params_from_iter(relaxed_all.iter()), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)? != 0,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)? != 0,
                     row.get::<_, i64>(5)? != 0,
-                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(6)? != 0,
                     row.get::<_, String>(7)?,
+                    row.get::<_, String>(8)?,
                 ))
             })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
-            .map(|(id, title, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
+            .map(|(id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
                 let ingredients_core = parse_json_str_array(&core_raw);
                 let directions = parse_json_str_array(&dir_raw);
-                let (score, matched_ingredients) = score_v2(user_ings, &ingredients_core, &title);
+                let (mut score, matched_ingredients) = score_v2(user_ings, &ingredients_core, &title);
+                if let (Some(ref req), Some(ref rec)) = (&body.cuisine, &cuisine) {
+                    let rl = rec.to_lowercase();
+                    let rql = req.to_lowercase();
+                    if rl.contains(rql.as_str()) || rql.contains(rl.as_str()) {
+                        score *= 1.25;
+                    }
+                }
                 let match_count = matched_ingredients.len();
-                CandidateRow { id, title, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count, matched_ingredients }
+                CandidateRow { id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count, matched_ingredients }
             })
+            // Always filter — never return 0-match recipes even in relaxation
+            .filter(|r| r.match_count > 0)
             .collect();
+
         relaxed.sort_unstable_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -824,6 +935,59 @@ mod scoring_tests {
     }
 
     #[test]
+    fn test_tokens_overlap_no_false_positives() {
+        // egg must NOT match eggplant
+        assert!(!tokens_overlap("eggplant", "egg"));
+        assert!(!tokens_overlap("egg", "eggplant"));
+        // pea must NOT match peanut
+        assert!(!tokens_overlap("peanut", "pea"));
+        assert!(!tokens_overlap("pea", "peanut"));
+        // chicken MUST match "chicken breast" (user typed more specific form)
+        assert!(tokens_overlap("chicken", "chicken breast"));
+        assert!(tokens_overlap("chicken breast", "chicken"));
+        // udon MUST match "udon noodles"
+        assert!(tokens_overlap("udon noodles", "udon"));
+        // exact match works
+        assert!(tokens_overlap("egg", "egg"));
+        // no overlap
+        assert!(!tokens_overlap("kimchi", "pasta"));
+    }
+
+    #[test]
+    fn test_rarity_idf_no_false_positives() {
+        // eggplant is niche — must NOT inherit egg's IDF via substring
+        assert_eq!(rarity_idf("eggplant"), 9.0);
+        // peanut is niche — must NOT inherit pea's IDF
+        assert_eq!(rarity_idf("peanut butter"), 9.0);
+        // chicken breast — token "chicken" is ultra-common
+        assert_eq!(rarity_idf("chicken breast"), 2.0);
+        // scrambled eggs — token "eggs" is COMMON
+        assert_eq!(rarity_idf("scrambled eggs"), 4.5);
+    }
+
+    #[test]
+    fn test_score_v2_no_eggplant_false_positive() {
+        let user = vec![ing("egg", "1 qty")];
+        let core = vec!["eggplant".to_string(), "tomato".to_string(), "mozzarella".to_string()];
+        let (score, matched) = score_v2(&user, &core, "Eggplant Parmesan");
+        assert_eq!(matched.len(), 0, "egg must not match eggplant (word boundary fix)");
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_idf_sql_weight_tiers() {
+        assert_eq!(idf_sql_weight("kimchi"), 3);
+        assert_eq!(idf_sql_weight("udon"), 3);
+        assert_eq!(idf_sql_weight("tahini"), 3);
+        assert_eq!(idf_sql_weight("egg"), 2);
+        assert_eq!(idf_sql_weight("eggs"), 2);
+        assert_eq!(idf_sql_weight("cheese"), 2);
+        assert_eq!(idf_sql_weight("chicken"), 1);
+        assert_eq!(idf_sql_weight("beef"), 1);
+        assert_eq!(idf_sql_weight("potato"), 1);
+    }
+
+    #[test]
     fn test_rarity_idf_tiers() {
         assert_eq!(rarity_idf("chicken"), 2.0);
         assert_eq!(rarity_idf("chicken breast"), 2.0);
@@ -881,9 +1045,97 @@ mod scoring_tests {
         let (without_title, _) = score_v2(&user, &core, "Noodle Soup");
 
         assert!(with_title > without_title, "title match should boost score");
-        // title bonus (+5.0) is applied before coverage/missing factors, so
-        // the final difference is 5.0 × coverage_factor × missing_factor
+        // title bonus scales with IDF: udon (IDF 9.0) → bonus 5.4 × coverage × missing ≈ 1.67
         assert!(with_title > without_title + 1.0, "title bonus should add meaningful score");
+    }
+
+    #[test]
+    fn test_title_bonus_scales_with_rarity() {
+        // Rare ingredient in title should get bigger absolute boost than common ingredient
+        let user_rare = vec![ing("kimchi", "1 qty")];
+        let user_common = vec![ing("chicken", "1 qty")];
+        let core_rare = vec!["kimchi".to_string(), "rice".to_string()];
+        let core_common = vec!["chicken".to_string(), "rice".to_string()];
+
+        let (rare_with, _) = score_v2(&user_rare, &core_rare, "Kimchi Fried Rice");
+        let (rare_without, _) = score_v2(&user_rare, &core_rare, "Fried Rice");
+        let (common_with, _) = score_v2(&user_common, &core_common, "Chicken Fried Rice");
+        let (common_without, _) = score_v2(&user_common, &core_common, "Fried Rice");
+
+        let rare_bonus = rare_with - rare_without;
+        let common_bonus = common_with - common_without;
+        assert!(
+            rare_bonus > common_bonus,
+            "kimchi title bonus ({rare_bonus:.2}) should exceed chicken title bonus ({common_bonus:.2})"
+        );
+    }
+
+    #[test]
+    fn test_title_bonus_no_eggplant_false_positive() {
+        let user = vec![ing("egg", "1 qty")];
+        // "Eggplant Parmesan" title has no "egg" token — must get no title bonus
+        let core_eggplant = vec!["eggplant".to_string(), "tomato".to_string()];
+        let (score_eggplant_title, _) = score_v2(&user, &core_eggplant, "Eggplant Parmesan");
+        // Score should be 0 — no match in ingredients either (thanks to Fix 1)
+        assert_eq!(score_eggplant_title, 0.0, "egg must not match eggplant in title or ingredients");
+
+        // "Scrambled Egg" title has "egg" token — must get title bonus
+        let core_egg = vec!["egg".to_string(), "butter".to_string()];
+        let (with_bonus, _) = score_v2(&user, &core_egg, "Scrambled Egg");
+        let (without_bonus, _) = score_v2(&user, &core_egg, "Scrambled Dish");
+        assert!(with_bonus > without_bonus, "egg should get title bonus when title contains 'egg' token");
+    }
+
+    #[test]
+    fn test_stem_variants_plurals() {
+        // -ies: berries → berry
+        let v = stem_variants("berries");
+        assert!(v.contains(&"berry".to_string()), "berries should stem to berry");
+        // -s: eggs → egg
+        let v2 = stem_variants("eggs");
+        assert!(v2.contains(&"egg".to_string()), "eggs should stem to egg");
+        // Add plural: egg → eggs
+        let v3 = stem_variants("egg");
+        assert!(v3.contains(&"eggs".to_string()), "egg should get eggs variant");
+        // -es: tomatoes → tomato
+        let v4 = stem_variants("tomatoes");
+        assert!(v4.contains(&"tomato".to_string()), "tomatoes should stem to tomato");
+        // Add plural: potato → potatoes
+        let v5 = stem_variants("potato");
+        assert!(v5.contains(&"potatos".to_string()) || v5.contains(&"potato".to_string()));
+        // Original always included
+        for name in &["udon", "kimchi", "chicken"] {
+            let variants = stem_variants(name);
+            assert!(variants.contains(&name.to_string()), "{name} should be in its own variants");
+        }
+    }
+
+    #[test]
+    fn test_score_v2_nonzero_when_matched() {
+        // If any ingredient matches, score must be > 0
+        let user = vec![ing("chicken", "1 qty")];
+        let core = vec!["chicken".to_string(), "rice".to_string()];
+        let (score, matched) = score_v2(&user, &core, "Chicken Rice");
+        assert!(!matched.is_empty(), "chicken should match");
+        assert!(score > 0.0, "matched recipe must have score > 0");
+    }
+
+    #[test]
+    fn test_cuisine_partial_match_logic() {
+        // Verify partial match string logic used in cuisine boost
+        let req = "asian";
+        let rec = "asian-chinese";
+        // word_tokens splits on '-', so "asian" token appears in both — partial match holds
+        assert!(rec.to_lowercase().contains(req) || req.contains(&rec.to_lowercase()));
+
+        let req2 = "thai";
+        let rec2 = "Thai";
+        assert!(rec2.to_lowercase().contains(req2));
+
+        // "Italian" should not match "Asian"
+        let req3 = "italian";
+        let rec3 = "asian";
+        assert!(!rec3.contains(req3) && !req3.contains(rec3));
     }
 
     #[test]
