@@ -1,4 +1,4 @@
-import { useRef, useState } from "react"
+import { useRef, useState, useEffect, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -66,6 +66,30 @@ const CUISINE_OPTIONS = [
 
 const QTY_OPTIONS: Quantity[] = ["1 qty", "a little", "plenty"]
 
+// Resize an image file to maxPx on its longest side, compress as JPEG,
+// and return the base64 string (no data-URI prefix).
+function resizeToBase64(file: File, maxPx: number, quality: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      URL.revokeObjectURL(url)
+      const { width, height } = img
+      const scale = Math.min(1, maxPx / Math.max(width, height))
+      const w = Math.round(width * scale)
+      const h = Math.round(height * scale)
+      const canvas = document.createElement("canvas")
+      canvas.width = w
+      canvas.height = h
+      canvas.getContext("2d")!.drawImage(img, 0, 0, w, h)
+      const dataUrl = canvas.toDataURL("image/jpeg", quality)
+      resolve(dataUrl.split(",")[1])
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Failed to load image")) }
+    img.src = url
+  })
+}
+
 // Maps a 0–10 confidence score to a Tailwind text-colour class.
 function confidenceColor(score: number): string {
   if (score >= 7.5) return "text-green-600"
@@ -125,7 +149,9 @@ export function IngredientInput({
   const [photoError, setPhotoError] = useState<string | null>(null)
   const [nudgeDismissed, setNudgeDismissed] = useState(false)
   const [duplicateFlash, setDuplicateFlash] = useState<string | null>(null)
+  const [dragOver, setDragOver] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
+  const dropZoneRef = useRef<HTMLDivElement>(null)
 
   const commitInput = () => {
     const name = inputVal.trim().toLowerCase()
@@ -148,21 +174,12 @@ export function IngredientInput({
     }
   }
 
-  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
+  const processImageFile = useCallback(async (file: File) => {
     setPhotoError(null)
     setPhotoLoading(true)
-
     try {
-      const buffer = await file.arrayBuffer()
-      const bytes = new Uint8Array(buffer)
-      let binary = ""
-      for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i])
-      }
-      const image_base64 = btoa(binary)
-      const mime_type = file.type || "image/jpeg"
+      const image_base64 = await resizeToBase64(file, 1920, 0.85)
+      const mime_type = "image/jpeg"
 
       const apiUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8080"
       const res = await fetch(`${apiUrl}/ai/identify-ingredients`, {
@@ -190,7 +207,48 @@ export function IngredientInput({
       setPhotoLoading(false)
       if (fileRef.current) fileRef.current.value = ""
     }
+  }, [onPhotoIngredients])
+
+  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (file) processImageFile(file)
   }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(false)
+    const file = Array.from(e.dataTransfer.files).find((f) =>
+      f.type.startsWith("image/"),
+    )
+    if (file) processImageFile(file)
+    else setPhotoError("Please drop an image file.")
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    setDragOver(true)
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    if (!dropZoneRef.current?.contains(e.relatedTarget as Node)) {
+      setDragOver(false)
+    }
+  }
+
+  // Ctrl+V / Cmd+V clipboard paste — only active while on the photo tab
+  useEffect(() => {
+    if (tab !== "photo") return
+    const handler = (e: ClipboardEvent) => {
+      const item = Array.from(e.clipboardData?.items ?? []).find((i) =>
+        i.type.startsWith("image/"),
+      )
+      if (!item) return
+      const file = item.getAsFile()
+      if (file) processImageFile(file)
+    }
+    window.addEventListener("paste", handler)
+    return () => window.removeEventListener("paste", handler)
+  }, [tab, processImageFile])
 
   const isReady = ingredients.length >= 3
 
@@ -269,18 +327,42 @@ export function IngredientInput({
           )}
         </div>
       ) : (
-        <div className="flex flex-col gap-3 items-start">
-          <p className="text-sm text-muted-foreground">
-            Upload a photo of your ingredients — we'll identify them automatically.
-          </p>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => fileRef.current?.click()}
-            disabled={photoLoading}
+        <div className="flex flex-col gap-3 w-full">
+          {/* Drop zone */}
+          <div
+            ref={dropZoneRef}
+            onDrop={handleDrop}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onClick={() => !photoLoading && fileRef.current?.click()}
+            className={[
+              "relative flex flex-col items-center justify-center gap-3 rounded-xl border-2 border-dashed px-6 py-10 transition-colors cursor-pointer select-none",
+              dragOver
+                ? "border-primary bg-primary/5"
+                : "border-border bg-muted/30 hover:border-primary/50 hover:bg-muted/50",
+              photoLoading ? "pointer-events-none opacity-60" : "",
+            ].join(" ")}
           >
-            {photoLoading ? "Identifying..." : "Choose photo"}
-          </Button>
+            {photoLoading ? (
+              <>
+                <span className="text-3xl animate-pulse">🔍</span>
+                <p className="text-sm font-medium text-foreground">Identifying ingredients…</p>
+              </>
+            ) : (
+              <>
+                <span className="text-3xl">{dragOver ? "📂" : "📷"}</span>
+                <div className="text-center">
+                  <p className="text-sm font-medium text-foreground">
+                    Drop a photo here, or{" "}
+                    <span className="text-primary underline underline-offset-2">choose file</span>
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Also works with <kbd className="px-1 py-0.5 rounded bg-muted border border-border text-[10px] font-mono">Ctrl+V</kbd> to paste from clipboard
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
           <input
             ref={fileRef}
             type="file"
