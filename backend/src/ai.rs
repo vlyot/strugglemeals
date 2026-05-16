@@ -148,7 +148,7 @@ pub async fn identify_ingredients(
             )
         }
         Err(e) => {
-            tracing::warn!("Gemini identify failed: {e}");
+            tracing::error!("Gemini identify failed: {e}");
             (
                 StatusCode::OK,
                 Json(IdentifyResponse {
@@ -224,18 +224,23 @@ async fn call_gemini(
         let status = resp.status();
 
         if status.is_success() {
-            let body: Value = resp.json().await.map_err(|e| e.to_string())?;
+            let raw_text = resp.text().await.map_err(|e| e.to_string())?;
+            tracing::info!("Gemini raw response (attempt {attempt}): {raw_text}");
+            let body: Value = serde_json::from_str(&raw_text)
+                .map_err(|e| format!("Failed to parse Gemini JSON body: {e}\nRaw: {raw_text}"))?;
             return parse_gemini_response(&body);
         }
 
         // Retry once on rate-limit or server error
         if attempt == 0 && (status.as_u16() == 429 || status.is_server_error()) {
-            tracing::warn!("Gemini returned {status}, retrying...");
+            let err_body = resp.text().await.unwrap_or_default();
+            tracing::warn!("Gemini returned {status} (attempt {attempt}), retrying... body: {err_body}");
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             continue;
         }
 
         let err_body = resp.text().await.unwrap_or_default();
+        tracing::error!("Gemini API error {status}: {err_body}");
         return Err(format!("Gemini API error {status}: {err_body}"));
     }
 
@@ -247,10 +252,18 @@ async fn call_gemini(
 /// Falls back to treating the output as a plain `[...]` array (old format) if the
 /// object parse fails, so a Gemini format regression doesn't silently break detection.
 fn parse_gemini_response(body: &Value) -> Result<(Vec<DetectedIngredient>, Vec<String>, Value), String> {
+    tracing::info!("Gemini parsed body: {body}");
+
     let text = body
         .pointer("/candidates/0/content/parts/0/text")
         .and_then(|v| v.as_str())
-        .ok_or("Unexpected Gemini response structure")?;
+        .ok_or_else(|| {
+            let msg = format!("Unexpected Gemini response structure — full body: {body}");
+            tracing::error!("{msg}");
+            msg
+        })?;
+
+    tracing::info!("Gemini extracted text: {text}");
 
     let trimmed = text.trim();
 
@@ -275,6 +288,7 @@ fn parse_gemini_response(body: &Value) -> Result<(Vec<DetectedIngredient>, Vec<S
                 .unwrap_or_default();
 
             if detected.is_empty() {
+                tracing::error!("Gemini parsed object but 'detected' array is empty. Full text: {text}");
                 return Err("Gemini returned empty detected list".into());
             }
 
@@ -308,7 +322,12 @@ fn parse_gemini_response(body: &Value) -> Result<(Vec<DetectedIngredient>, Vec<S
     }
 
     // Fallback: plain array format — assign confidence 10.0 to all.
-    let start = trimmed.find('[').ok_or("No JSON in Gemini response")?;
+    tracing::warn!("Gemini object parse failed or not an object, trying plain array fallback. text: {trimmed}");
+    let start = trimmed.find('[').ok_or_else(|| {
+        let msg = format!("No JSON array in Gemini response. text: {trimmed}");
+        tracing::error!("{msg}");
+        msg
+    })?;
     let end = trimmed.rfind(']').ok_or("No closing bracket in Gemini response")?;
     let json_str = &trimmed[start..=end];
 
