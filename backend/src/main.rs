@@ -8,6 +8,7 @@ use dotenvy::dotenv;
 use r2d2_sqlite::SqliteConnectionManager;
 use sqlx::postgres::PgPoolOptions;
 use std::{env, sync::{atomic::{AtomicBool, Ordering}, Arc}};
+use tokio::sync::Semaphore;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -119,7 +120,27 @@ async fn main() {
         });
     }
 
-    let state = AppState { pg, sqlite, http, gemini_api_key, groq_api_key, fts_ready };
+    let rpm_limit: usize = env::var("GEMINI_RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    let gemini_limiter = Arc::new(Semaphore::new(rpm_limit));
+    {
+        let limiter = gemini_limiter.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let current = limiter.available_permits();
+                let to_add = rpm_limit.saturating_sub(current);
+                if to_add > 0 {
+                    limiter.add_permits(to_add);
+                }
+            }
+        });
+    }
+    tracing::info!("Gemini rate limit: {rpm_limit} RPM");
+
+    let state = AppState { pg, sqlite, http, gemini_api_key, groq_api_key, fts_ready, gemini_limiter };
 
     // Support multiple comma-separated origins in FRONTEND_URL
     let origins: Vec<HeaderValue> = frontend_url

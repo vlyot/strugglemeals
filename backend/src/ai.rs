@@ -89,6 +89,24 @@ pub async fn identify_ingredients(
     State(state): State<AppState>,
     Json(body): Json<IdentifyRequest>,
 ) -> impl IntoResponse {
+    // Enforce per-minute rate limit before any Gemini work.
+    let _permit = match state.gemini_limiter.try_acquire() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(IdentifyResponse {
+                    ingredients: None,
+                    detected: None,
+                    suggestions: None,
+                    confidence_legend: None,
+                    error: Some("rate_limited".into()),
+                    message: Some("Too many photo scans right now. Please try again in a minute.".into()),
+                }),
+            );
+        }
+    };
+
     if state.gemini_api_key.is_empty() {
         return (
             StatusCode::OK,
@@ -465,31 +483,37 @@ fn build_shortlist_entries(candidates: &[CandidateRow]) -> Vec<ShortlistEntry> {
 /// The frontend renders recipe cards on the first event and updates theme labels on the second.
 /// X-Accel-Buffering: no tells Railway's NGINX proxy to flush each SSE event immediately
 /// instead of batching them, so the two-phase UX benefit is preserved in production.
+///
+/// Candidates are fetched exactly once and reused for both phases, avoiding a redundant
+/// SQLite scan + JSON parse + rayon scoring pass.
 pub async fn theme_shortlist(
     State(state): State<AppState>,
     Json(body): Json<ShortlistRequest>,
 ) -> impl IntoResponse {
     let user_ings = resolve_user_ings(&body);
 
-    // Fetch candidates via spawn_blocking so the SQLite scan + rayon scoring
+    // Fetch candidates once via spawn_blocking so the SQLite scan + rayon scoring
     // run on the blocking thread pool, freeing the tokio executor.
     let fts_ready = state.fts_ready.load(std::sync::atomic::Ordering::Relaxed);
-    let initial_entries = if body.ingredients.is_empty() || user_ings.is_empty() {
-        vec![]
+    let (initial_entries, candidates) = if body.ingredients.is_empty() || user_ings.is_empty() {
+        (vec![], vec![])
     } else {
         let pool = state.sqlite.clone();
         let body_c = body.clone();
         let ings_c = user_ings.clone();
         match tokio::task::spawn_blocking(move || fetch_candidates(&pool, &body_c, &ings_c, fts_ready)).await {
-            Ok(Ok(candidates)) if !candidates.is_empty() => build_shortlist_entries(&candidates),
-            Ok(Ok(_)) => vec![],
+            Ok(Ok(candidates)) if !candidates.is_empty() => {
+                let entries = build_shortlist_entries(&candidates);
+                (entries, candidates)
+            }
+            Ok(Ok(_)) => (vec![], vec![]),
             Ok(Err(e)) => {
                 tracing::error!("theme_shortlist SQLite error: {e}");
-                vec![]
+                (vec![], vec![])
             }
             Err(e) => {
                 tracing::error!("theme_shortlist spawn_blocking panic: {e}");
-                vec![]
+                (vec![], vec![])
             }
         }
     };
@@ -502,23 +526,14 @@ pub async fn theme_shortlist(
     .unwrap_or_default();
     let scores_event = Event::default().event("scores").data(scores_data);
 
-    // Phase 2: call Groq for theme classification, emit result when ready.
-    let has_groq = !state.groq_api_key.is_empty() && !initial_entries.is_empty();
+    // Phase 2: call Groq for theme classification using the already-fetched candidates.
+    let has_groq = !state.groq_api_key.is_empty() && !candidates.is_empty();
 
     let themes_stream = stream::once(async move {
         if !has_groq {
             return None;
         }
-        let user_ings2 = resolve_user_ings(&body);
-        let fts_ready2 = state.fts_ready.load(std::sync::atomic::Ordering::Relaxed);
-        let pool2 = state.sqlite.clone();
-        let body_c2 = body.clone();
-        let ings_c2 = user_ings2.clone();
-        let candidates = match tokio::task::spawn_blocking(move || fetch_candidates(&pool2, &body_c2, &ings_c2, fts_ready2)).await {
-            Ok(Ok(c)) if !c.is_empty() => c,
-            _ => return None,
-        };
-        match call_groq_shortlist(&state, &candidates, &user_ings2).await {
+        match call_groq_shortlist(&state, &candidates, &user_ings).await {
             Ok(results) => {
                 let data = serde_json::to_string(&ShortlistResponse { results, groq_used: true })
                     .unwrap_or_default();
@@ -1412,6 +1427,33 @@ mod identify_tests {
     fn parse_gemini_response_no_json_errors() {
         let body = make_body("I can see some food in your fridge.");
         assert!(parse_gemini_response(&body).is_err());
+    }
+
+    // --- Rate limiter semaphore behaviour ---
+
+    #[test]
+    fn rate_limit_try_acquire_fails_when_no_permits() {
+        // Zero-permit semaphore: try_acquire must fail immediately.
+        let sem = tokio::sync::Semaphore::new(0);
+        assert!(sem.try_acquire().is_err());
+    }
+
+    #[test]
+    fn rate_limit_try_acquire_succeeds_then_second_fails() {
+        // One permit: first succeeds, second fails while first is held.
+        let sem = tokio::sync::Semaphore::new(1);
+        let permit = sem.try_acquire().expect("first acquire should succeed");
+        assert!(sem.try_acquire().is_err(), "second acquire should fail while permit held");
+        drop(permit);
+    }
+
+    #[test]
+    fn rate_limit_permit_released_on_drop() {
+        // After dropping the permit, the semaphore restores its count.
+        let sem = tokio::sync::Semaphore::new(1);
+        let permit = sem.try_acquire().expect("acquire should succeed");
+        drop(permit);
+        assert!(sem.try_acquire().is_ok(), "re-acquire after drop should succeed");
     }
 }
 

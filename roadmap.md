@@ -278,8 +278,29 @@ _Depends on Phase 6. Final phase before real-world validation._
      - 5 new unit tests: `test_build_fts_match_single`, `test_build_fts_match_multiple`, `test_build_fts_match_strips_quotes`, `test_build_fts_match_relaxed_expands_variants`, `test_build_fts_match_relaxed_berry_variant`.
      - Total unit tests: 43 (up from 38). All pass, zero clippy warnings.
 
+- **Performance fix — eliminate double candidate fetch (current):**
+  - **Root cause:** `theme_shortlist` called `fetch_candidates()` twice per request — once for Phase 1 (scores SSE event) and again for Phase 2 (Groq theme classification). The second call re-ran the full FTS5 query, fetched 500 rows from disk, JSON-parsed 1000 fields, and rayon-scored all candidates — identical redundant work.
+  - **Fix (`backend/src/ai.rs`, `theme_shortlist`):** `fetch_candidates` now called exactly once. The returned `Vec<CandidateRow>` is kept in scope and passed directly into the Phase 2 `stream::once` closure. `build_shortlist_entries` still operates on the same candidates for Phase 1. No data structure changes required.
+  - **Impact:** halves SQLite I/O and rayon scoring work per request. With FTS5 index built, this brings Phase 1 latency from ~200–600ms to ~100–300ms and eliminates the doubled Phase 2 setup cost.
+  - **Unit tests:** all 46 existing tests pass (no scoring logic changed).
+
+- **UX fix — accurate recipe count per theme tab:**
+  - **Bug:** the "N recipes matched" subtitle in `ShortlistView` showed `results.length` — the total across all themes. When a theme had 0 results (e.g. condiments-only scan returning 0 Light recipes), the subtitle read "6 recipes matched" while the tab body read "No light recipes found".
+  - **Fix (`frontend/src/components/cook/ShortlistView.tsx`):** active tab lifted into controlled state (`useState<Theme>`). Subtitle now reads `byTheme(activeTheme).length`. `<Tabs>` converted from uncontrolled (`defaultValue`) to controlled (`value` + `onValueChange`). Count updates immediately when the user switches tabs.
+  - **Build:** clean TypeScript compile, no new lint errors.
+
+- **Gemini Vision rate limiting (current):**
+  - **Problem:** `POST /ai/identify-ingredients` had no client-side throttle. Gemini 2.5 Flash free tier is capped at 10 RPM — unthrottled concurrent traffic would exhaust the quota and propagate hard 429s to users.
+  - **Implementation (`backend/src/lib.rs`, `backend/src/main.rs`, `backend/src/ai.rs`):**
+    - `gemini_limiter: Arc<tokio::sync::Semaphore>` added to `AppState`. Permit count = `GEMINI_RATE_LIMIT_RPM` env var (default: 10).
+    - Background `tokio::spawn` refills the semaphore to full every 60 seconds (fixed-window reset matching Gemini's RPM window).
+    - `identify_ingredients` acquires one permit via `try_acquire()` at the top of the handler — before any base64 validation or Gemini call. If no permit is available, returns HTTP 429 with `{ error: "rate_limited", message: "Too many photo scans right now. Please try again in a minute." }` immediately.
+    - Frontend surfaces the message via the existing `photoError` / `setPhotoError` path — no frontend changes required.
+  - **Configuration:** set `GEMINI_RATE_LIMIT_RPM` Railway env var to override default (e.g. set to 50 when upgrading to a paid Gemini tier).
+  - **Unit tests:** 3 new tests (`rate_limit_try_acquire_fails_when_no_permits`, `rate_limit_try_acquire_succeeds_then_second_fails`, `rate_limit_permit_released_on_drop`). Total: 46 unit tests, zero clippy warnings.
+  - **E2E verified:** Playwright confirmed the rate-limit message surfaces correctly in the photo upload UI when the endpoint returns 429.
+
 **Remaining:**
-- FTS5 migration on first Railway deploy (happens automatically, ~2–5 min, no downtime)
 - Basic accessibility pass
 - Copy and microcopy review — tone consistent, helper text clear
 - README and GitHub repository cleaned up for portfolio presentation

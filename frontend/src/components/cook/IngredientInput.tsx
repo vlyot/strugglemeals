@@ -34,6 +34,7 @@ interface Props {
     legend: { high: string; mid: string; low: string } | null,
   ) => void
   onSubmit: () => void
+  onClearAll: () => void
   // Photo scan enrichment
   suggestions?: string[]
   detectedWithConf?: Array<{ name: string; confidence: number }>
@@ -134,6 +135,7 @@ export function IngredientInput({
   onCuisineChange,
   onPhotoIngredients,
   onSubmit,
+  onClearAll,
   suggestions,
   detectedWithConf,
   confidenceLegend,
@@ -385,12 +387,21 @@ export function IngredientInput({
             <span className="text-xs font-medium tracking-widest uppercase text-muted-foreground">
               Added · {ingredients.length}
             </span>
-            {isReady && (
-              <span className="flex items-center gap-1.5 text-xs font-medium text-green-700">
-                <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" />
-                Ready
-              </span>
-            )}
+            <div className="flex items-center gap-3">
+              {isReady && (
+                <span className="flex items-center gap-1.5 text-xs font-medium text-green-700">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 inline-block" />
+                  Ready
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={onClearAll}
+                className="text-xs text-muted-foreground hover:text-destructive transition-colors"
+              >
+                Clear all
+              </button>
+            </div>
           </div>
           <div className="flex flex-wrap gap-2">
             {ingredients.map(({ name, qty }) => (

@@ -264,12 +264,13 @@ function ThemeSection({
 }
 
 export function ShortlistView({ results, loading, progress, presenting, userIngredients, onBack, onCook }: Props) {
-  // Determine default tab (first theme that has results)
   const byTheme = (theme: Theme) =>
     results.filter((r) => r.theme === theme)
 
   const defaultTab =
     THEMES.find((t) => byTheme(t).length > 0) ?? "Filling"
+
+  const [activeTheme, setActiveTheme] = useState<Theme>(defaultTab)
 
   const showProgress = progress > 0 && progress < 100
 
@@ -337,13 +338,13 @@ export function ShortlistView({ results, loading, progress, presenting, userIngr
         <div>
           <p className="font-medium text-foreground">Ingredients</p>
           <p className="text-xs text-muted-foreground">
-            {results.length} recipe{results.length !== 1 ? "s" : ""} matched
+            {byTheme(activeTheme).length} recipe{byTheme(activeTheme).length !== 1 ? "s" : ""} matched
           </p>
         </div>
       </div>
 
       {/* Theme tabs */}
-      <Tabs defaultValue={defaultTab} className="flex-col">
+      <Tabs value={activeTheme} onValueChange={(v) => setActiveTheme(v as Theme)} className="flex-col">
         <TabsList className="w-full h-10">
           {THEMES.map((t) => (
             <TabsTrigger key={t} value={t} className="flex-1 h-full">

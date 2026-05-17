@@ -301,6 +301,7 @@ export default function CookPage() {
               onCuisineChange={setCuisine}
               onPhotoIngredients={handlePhotoIngredients}
               onSubmit={handleFindRecipes}
+              onClearAll={() => setIngredients([])}
               suggestions={suggestions}
               detectedWithConf={detectedWithConf}
               confidenceLegend={confidenceLegend}
