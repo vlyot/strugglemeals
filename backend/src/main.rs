@@ -45,15 +45,16 @@ async fn main() {
             .build(manager)
             .expect("Failed to open SQLite pool"),
     );
-    // Apply performance pragmas once at startup
+    // Apply performance pragmas once at startup.
+    // journal_mode returns a result row so it must use pragma_update, not execute_batch.
     {
         let conn = sqlite.get().expect("Failed to get SQLite connection for pragmas");
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA cache_size=-65536;",
-        )
-        .expect("Failed to apply SQLite pragmas");
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .expect("Failed to set WAL mode");
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .expect("Failed to set synchronous=NORMAL");
+        conn.pragma_update(None, "cache_size", -65536_i64)
+            .expect("Failed to set cache_size");
         tracing::info!("SQLite pragmas applied (WAL mode, 64MB page cache)");
     }
 
