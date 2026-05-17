@@ -587,6 +587,45 @@ pub(crate) fn is_pantry_staple_ai(ingredient: &str) -> bool {
     STAPLES.contains(&ingredient)
 }
 
+/// Returns true if the recipe title indicates it is not a standalone meal —
+/// e.g. a sauce, dip, dressing, marinade, topping, spread, or condiment.
+/// Used to filter candidates before scoring and before sending to Groq.
+fn is_non_meal_title(title: &str) -> bool {
+    const NON_MEAL_SUFFIXES: &[&str] = &[
+        "sauce", "dip", "dipping sauce", "dressing", "marinade", "marinate",
+        "glaze", "rub", "seasoning", "topping", "spread", "butter",
+        "condiment", "relish", "chutney", "salsa", "vinaigrette",
+        "syrup", "jam", "jelly", "preserve", "compote",
+        "frosting", "icing", "glaze", "ganache",
+        "stock", "broth",
+    ];
+    const NON_MEAL_STANDALONE: &[&str] = &[
+        "gravy", "aioli", "hummus", "guacamole", "pesto", "tapenade",
+    ];
+
+    let lower = title.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| c.is_whitespace() || c == '-' || c == '(')
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    // Check if any suffix word appears as the last meaningful token
+    if let Some(&last) = tokens.last() {
+        let last_clean = last.trim_end_matches(|c: char| !c.is_alphanumeric());
+        if NON_MEAL_SUFFIXES.contains(&last_clean) {
+            return true;
+        }
+    }
+    // Check standalone titles that are always non-meals regardless of position
+    for word in &tokens {
+        let w = word.trim_end_matches(|c: char| !c.is_alphanumeric());
+        if NON_MEAL_STANDALONE.contains(&w) {
+            return true;
+        }
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // TF-IDF / BM25-inspired scoring
 // ---------------------------------------------------------------------------
@@ -839,7 +878,7 @@ fn score_raw_rows(
             let match_count = matched_ingredients.len();
             CandidateRow { id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count, matched_ingredients }
         })
-        .filter(|r| r.match_count > 0)
+        .filter(|r| r.match_count > 0 && !is_non_meal_title(&r.title))
         .collect()
 }
 
@@ -1221,7 +1260,8 @@ Return ONLY valid JSON — no markdown fences, no commentary:
 Rules:
 - Only include recipes from the provided list (use the exact id)
 - At most 2 per theme; maximum 6 total
-- Do not repeat the same recipe in multiple themes"#;
+- Do not repeat the same recipe in multiple themes
+- EXCLUDE any recipe that is not a standalone meal: no sauces, dips, dressings, marinades, glazes, condiments, toppings, spreads, stocks, or frostings — even if they scored well"#;
 
     let user_message = format!(
         "User has:\n{}\n\nCandidates (sorted by relevance, best first):\n{}",
@@ -2035,6 +2075,37 @@ mod scoring_tests {
         // stem_variants("berries") → ["berries", "berry"]
         assert!(expr.contains("\"berry\""), "should include singular: {expr}");
         assert!(expr.contains("\"berries\""), "should include original: {expr}");
+    }
+
+    #[test]
+    fn test_non_meal_title_sauces_and_dips() {
+        assert!(is_non_meal_title("Cheese Sauce"));
+        assert!(is_non_meal_title("Honey Mustard Dipping Sauce"));
+        assert!(is_non_meal_title("Caesar Dressing"));
+        assert!(is_non_meal_title("Garlic Butter"));
+        assert!(is_non_meal_title("BBQ Marinade"));
+        assert!(is_non_meal_title("Lemon Glaze"));
+        assert!(is_non_meal_title("Chicken Stock"));
+        assert!(is_non_meal_title("Strawberry Jam"));
+        assert!(is_non_meal_title("Chocolate Frosting"));
+    }
+
+    #[test]
+    fn test_non_meal_title_standalone_terms() {
+        assert!(is_non_meal_title("Classic Guacamole"));
+        assert!(is_non_meal_title("Basil Pesto"));
+        assert!(is_non_meal_title("Roasted Garlic Aioli"));
+    }
+
+    #[test]
+    fn test_non_meal_title_allows_real_meals() {
+        assert!(!is_non_meal_title("Cheesy Pasta Bake"));
+        assert!(!is_non_meal_title("Udon Noodle Soup"));
+        assert!(!is_non_meal_title("Egg Fried Rice"));
+        assert!(!is_non_meal_title("Kimchi Fried Rice"));
+        assert!(!is_non_meal_title("Chicken Stir Fry"));
+        assert!(!is_non_meal_title("Butternut Squash Risotto"));
+        assert!(!is_non_meal_title("Grilled Cheese Sandwich"));
     }
 }
 

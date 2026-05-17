@@ -253,56 +253,57 @@ _Depends on Phase 6. Final phase before real-world validation._
   - **Optional badge in missing panel** (`frontend/src/components/cook/ShortlistView.tsx`): missing ingredients with `optional: true` render a small "optional" pill badge inline — visually distinguishes hard-to-find required ingredients from pantry staples the user almost certainly has or can skip.
   - **Category-level Groq substitutes** (`backend/src/ai.rs`, `call_groq()` system prompt): Groq is now instructed to give the most general category-level substitution possible — "any neutral oil" not "vegetable oil", "any acid" not "white wine vinegar", "any crunchy pickle" not "cornichons". For regional/specialty ingredients (e.g. "Texas style hot pickled okra pods"), Groq describes the functional role in the dish rather than naming an alternative ("any pickled vegetable for crunch and acidity").
 
-- **Search latency reduction — 3 targeted fixes (current):**
+- **Search latency — FTS5 inverted index + rayon parallel scoring:**
 
-  **Root cause:** every recipe search was a full-table scan on 1.94M rows via `json_each(ingredients_core) LIKE ?` — no index can help this query. Railway's NGINX proxy was also buffering both SSE events together, collapsing the two-phase UX benefit.
+  **Problem:** every recipe search was a full-table scan on 1.94M rows via `json_each(ingredients_core) LIKE ?` with no usable index — O(R × R_avg × I) per request (~580M operations for a typical query). Railway's NGINX proxy was also batching both SSE events, collapsing the two-phase UX.
 
-  1. **FTS5 inverted index** (`backend/src/ai.rs`, `backend/src/main.rs`, `backend/src/lib.rs`):
-     - `CREATE VIRTUAL TABLE recipes_fts USING fts5(ingredients_text, content='recipes', content_rowid='id', tokenize='unicode61 remove_diacritics 1')` — one row per recipe, ingredients stored as space-joined text.
-     - Background migration spawned in `main.rs` via `tokio::spawn` + `spawn_blocking` — server accepts traffic on the existing `json_each` path while the table builds (~2–5 min on first deploy), then switches transparently.
-     - `fts_ready: Arc<AtomicBool>` added to `AppState`; flips to `true` when migration completes.
-     - `fetch_candidates_fts()`: replaces `EXISTS (SELECT 1 FROM json_each(…) WHERE LOWER(value) LIKE ?)` with `WHERE r.id IN (SELECT rowid FROM recipes_fts WHERE ingredients_text MATCH ?)`.
-     - MATCH expression built by `build_fts_match()` — each ingredient double-quoted (`"egg"`) to enforce exact token match (prevents `"egg"` → `"eggplant"` false positives, consistent with `tokens_overlap`).
-     - Relaxation path updated: `build_fts_match_relaxed()` expands `stem_variants` into the MATCH expression.
-     - `rusqlite` feature updated from `["bundled"]` → `["bundled", "bundled-full"]` to enable `SQLITE_ENABLE_FTS5` at compile time.
-  2. **SSE anti-buffering header** (`backend/src/ai.rs`, `theme_shortlist`):
-     - Return type changed from `Sse<impl Stream<…>>` to `impl IntoResponse`.
-     - `X-Accel-Buffering: no` added as a response header via `HeaderMap` — tells Railway's NGINX to flush each SSE chunk immediately so the `scores` event reaches the browser before Groq finishes.
-  3. **Rayon parallel scoring + `spawn_blocking`** (`backend/src/ai.rs`, `fetch_candidates`):
-     - `rayon = "1"` added to `Cargo.toml`.
-     - Both `fetch_candidates` calls in `theme_shortlist` wrapped in `tokio::task::spawn_blocking` — SQLite I/O no longer blocks the tokio executor.
-     - `fetch_candidates` restructured: Phase 1 collects raw SQLite tuples sequentially (required by rusqlite); Phase 2 scores via `into_par_iter()` (rayon).
-     - `score_raw_rows()` helper extracted — shared by primary and relaxation paths.
-     - `fts_query_raw()` helper executes any FTS5 MATCH SQL and returns raw tuples.
-     - `RawRow` type alias hoisted to module level (was function-local, caused clippy `type_complexity` lint).
-     - 5 new unit tests: `test_build_fts_match_single`, `test_build_fts_match_multiple`, `test_build_fts_match_strips_quotes`, `test_build_fts_match_relaxed_expands_variants`, `test_build_fts_match_relaxed_berry_variant`.
-     - Total unit tests: 43 (up from 38). All pass, zero clippy warnings.
+  **What was built:**
+  - `recipes_fts` FTS5 virtual table (`backend/src/main.rs`): plain (non-content) table storing one row per recipe with `ingredients_text` as space-joined ingredient tokens. `tokenize='unicode61 remove_diacritics 1'`.
+  - Background migration at startup (`tokio::spawn` + `spawn_blocking`): server accepts traffic on the json_each fallback path while the index builds, then `fts_ready: Arc<AtomicBool>` flips to `true` transparently.
+  - `fetch_candidates_fts()` (`backend/src/ai.rs`): replaces the EXISTS/json_each WHERE clauses with `WHERE r.id IN (SELECT rowid FROM recipes_fts WHERE ingredients_text MATCH ?)`. Each ingredient double-quoted in the MATCH expression (`"egg"`) to enforce exact token boundaries — consistent with `tokens_overlap`.
+  - `build_fts_match()` / `build_fts_match_relaxed()`: construct MATCH expressions; relaxed variant expands `stem_variants` for the <3 results fallback path.
+  - `rusqlite` feature upgraded from `["bundled"]` → `["bundled", "bundled-full"]` to compile in `SQLITE_ENABLE_FTS5`.
+  - `rayon = "1"` added; `fetch_candidates` restructured so raw SQLite rows are collected sequentially (rusqlite requirement) then scored via `into_par_iter()` across CPU cores.
+  - `score_raw_rows()` and `fts_query_raw()` helpers extracted for shared use between primary and relaxation paths. `RawRow` type alias hoisted to module level.
+  - `X-Accel-Buffering: no` response header added to `theme_shortlist` — instructs Railway's NGINX to flush each SSE chunk immediately.
+  - 5 new unit tests for FTS5 match builders. Total: 43 unit tests (up from 38).
 
-- **Critical fix — FTS5 migration panic on every deploy (current):**
-  - **Root cause (confirmed via Railway logs):** FTS5 virtual table existed on the Railway volume from an older schema (`content='recipes'`). The migration code used `CREATE VIRTUAL TABLE IF NOT EXISTS`, which silently skipped recreation, leaving the stale content-table schema in place. The subsequent `INSERT INTO recipes_fts` then panicked with `no such column: T.ingredients_text` because the old shadow table layout doesn't match the plain FTS5 schema. Since the migration panicked, `fts_ready` never flipped to `true` on any deploy — every request fell back to the O(1.94M × ingredients) json_each full-table scan, causing minutes-long latency.
-  - **Fix (`backend/src/main.rs`):** Migration now runs `DROP TABLE IF EXISTS recipes_fts` before `CREATE VIRTUAL TABLE`. Dropping a FTS5 virtual table also removes all shadow tables (`_data`, `_idx`, `_content`, `_docsize`, `_config`) atomically. The `WHERE r.id NOT IN (SELECT rowid FROM recipes_fts)` incremental guard is removed since the table is always fresh after the drop. This adds ~2–5 min rebuild time on next deploy, after which the table is persisted on the Railway volume and subsequent deploys skip the migration entirely via the row-count check.
+  **Actual complexity (FTS5 fast path):** O(log R) per ingredient token for candidate selection, O(C × I × R_avg / cores) for parallel scoring with C ≤ 500. Phase 1 (scores SSE, no Groq) ~100–300ms. Phase 2 (Groq themes) ~500ms–2s network-bound.
 
-- **Performance fix — eliminate double candidate fetch (current):**
-  - **Root cause:** `theme_shortlist` called `fetch_candidates()` twice per request — once for Phase 1 (scores SSE event) and again for Phase 2 (Groq theme classification). The second call re-ran the full FTS5 query, fetched 500 rows from disk, JSON-parsed 1000 fields, and rayon-scored all candidates — identical redundant work.
-  - **Fix (`backend/src/ai.rs`, `theme_shortlist`):** `fetch_candidates` now called exactly once. The returned `Vec<CandidateRow>` is kept in scope and passed directly into the Phase 2 `stream::once` closure. `build_shortlist_entries` still operates on the same candidates for Phase 1. No data structure changes required.
-  - **Impact:** halves SQLite I/O and rayon scoring work per request. With FTS5 index built, this brings Phase 1 latency from ~200–600ms to ~100–300ms and eliminates the doubled Phase 2 setup cost.
-  - **Unit tests:** all 46 existing tests pass (no scoring logic changed).
+- **Critical bug — FTS5 migration panic silently disabled FTS5 on every deploy:**
 
-- **UX fix — accurate recipe count per theme tab:**
-  - **Bug:** the "N recipes matched" subtitle in `ShortlistView` showed `results.length` — the total across all themes. When a theme had 0 results (e.g. condiments-only scan returning 0 Light recipes), the subtitle read "6 recipes matched" while the tab body read "No light recipes found".
-  - **Fix (`frontend/src/components/cook/ShortlistView.tsx`):** active tab lifted into controlled state (`useState<Theme>`). Subtitle now reads `byTheme(activeTheme).length`. `<Tabs>` converted from uncontrolled (`defaultValue`) to controlled (`value` + `onValueChange`). Count updates immediately when the user switches tabs.
-  - **Build:** clean TypeScript compile, no new lint errors.
+  **Root cause (confirmed in Railway logs):** a stale FTS5 table from an earlier `content='recipes'` schema existed on the Railway volume. `CREATE VIRTUAL TABLE IF NOT EXISTS` silently skipped recreation, leaving the old shadow table layout intact. The `INSERT INTO recipes_fts` then panicked immediately with `no such column: T.ingredients_text`. Because the migration task panicked, `fts_ready` never flipped to `true` — every request on every deploy fell back to the O(580M) json_each scan, causing minutes-long latency in production while local testing (no stale volume) worked fine.
 
-- **Gemini Vision rate limiting (current):**
-  - **Problem:** `POST /ai/identify-ingredients` had no client-side throttle. Gemini 2.5 Flash free tier is capped at 10 RPM — unthrottled concurrent traffic would exhaust the quota and propagate hard 429s to users.
-  - **Implementation (`backend/src/lib.rs`, `backend/src/main.rs`, `backend/src/ai.rs`):**
-    - `gemini_limiter: Arc<tokio::sync::Semaphore>` added to `AppState`. Permit count = `GEMINI_RATE_LIMIT_RPM` env var (default: 10).
-    - Background `tokio::spawn` refills the semaphore to full every 60 seconds (fixed-window reset matching Gemini's RPM window).
-    - `identify_ingredients` acquires one permit via `try_acquire()` at the top of the handler — before any base64 validation or Gemini call. If no permit is available, returns HTTP 429 with `{ error: "rate_limited", message: "Too many photo scans right now. Please try again in a minute." }` immediately.
-    - Frontend surfaces the message via the existing `photoError` / `setPhotoError` path — no frontend changes required.
-  - **Configuration:** set `GEMINI_RATE_LIMIT_RPM` Railway env var to override default (e.g. set to 50 when upgrading to a paid Gemini tier).
-  - **Unit tests:** 3 new tests (`rate_limit_try_acquire_fails_when_no_permits`, `rate_limit_try_acquire_succeeds_then_second_fails`, `rate_limit_permit_released_on_drop`). Total: 46 unit tests, zero clippy warnings.
-  - **E2E verified:** Playwright confirmed the rate-limit message surfaces correctly in the photo upload UI when the endpoint returns 429.
+  **Fix (`backend/src/main.rs`):** migration now runs `DROP TABLE IF EXISTS recipes_fts` before `CREATE VIRTUAL TABLE recipes_fts`. Dropping a FTS5 virtual table removes all shadow tables atomically. The incremental `WHERE r.id NOT IN (SELECT rowid FROM recipes_fts)` guard was removed — table is always rebuilt clean. One-time rebuild cost: ~2–5 min on Railway; table then persists across deploys and the row-count check skips the migration on subsequent restarts.
+
+- **Performance fix — fetch_candidates called twice per request:**
+
+  **Root cause:** `theme_shortlist` called `fetch_candidates()` independently for Phase 1 (scores SSE) and Phase 2 (Groq), running the full FTS5 query + 500-row fetch + 1000 JSON parses + rayon scoring twice per request. Phase 2 re-fetched because `initial_entries` only held `ShortlistEntry` structs (no `directions` field needed by Groq).
+
+  **Fix (`backend/src/ai.rs`):** `fetch_candidates` called once. `Vec<CandidateRow>` kept in scope and moved into the Phase 2 `stream::once` closure directly. Halves SQLite I/O and scoring work per request. 46/46 unit tests pass unchanged.
+
+- **UX fix — recipe count subtitle showed total across all tabs, not active tab:**
+
+  **Bug:** "N recipes matched" subtitle in `ShortlistView` used `results.length` (total across all themes). With 0 Light / 3 Filling / 3 Quick, switching to Light showed "6 recipes matched" alongside "No light recipes found for your ingredients."
+
+  **Fix (`frontend/src/components/cook/ShortlistView.tsx`):** active tab lifted into `useState<Theme>`. `<Tabs>` converted from uncontrolled (`defaultValue`) to controlled (`value` + `onValueChange`). Subtitle counts `byTheme(activeTheme).length` — updates immediately on tab switch.
+
+- **Gemini Vision rate limiting:**
+
+  **Problem:** `POST /ai/identify-ingredients` had no throttle. Gemini 2.5 Flash free tier caps at 10 RPM — concurrent traffic exhausted quota and returned hard 429s to users.
+
+  **Implementation (`backend/src/lib.rs`, `backend/src/main.rs`, `backend/src/ai.rs`):**
+  - `gemini_limiter: Arc<tokio::sync::Semaphore>` in `AppState`. Permit count from `GEMINI_RATE_LIMIT_RPM` env var (default: 10).
+  - Background task refills semaphore to full every 60 seconds (fixed-window matching Gemini's RPM window).
+  - `identify_ingredients` calls `try_acquire()` before any validation or API call. No permit → HTTP 429 with `{ error: "rate_limited", message: "Too many photo scans right now. Please try again in a minute." }`. Frontend surfaces via existing `photoError` path.
+  - Set `GEMINI_RATE_LIMIT_RPM` Railway env var to raise limit when upgrading to a paid Gemini tier.
+  - 3 new unit tests. Total: 46 unit tests, zero clippy warnings.
+
+- **Quality fix — non-meal recipes filtered from shortlist:**
+  - **Bug:** recipes that are sauces, dips, dressings, marinades, glazes, condiments, spreads, stocks, frostings, jams, etc. could surface as meal suggestions (e.g. "Cheese Sauce" classified as Filling).
+  - **Fix (`backend/src/ai.rs`):** `is_non_meal_title(title)` function checks the recipe title's last meaningful token against a suffix blocklist (sauce, dip, dressing, marinade, glaze, rub, seasoning, topping, spread, butter, condiment, relish, chutney, salsa, vinaigrette, syrup, jam, jelly, frosting, icing, ganache, stock, broth) and a standalone term list (gravy, aioli, hummus, guacamole, pesto, tapenade). Applied in `score_raw_rows()` alongside the existing `match_count > 0` filter — non-meals never reach Phase 1 display or Groq.
+  - Groq prompt also updated with an explicit exclusion rule as a secondary defence.
+  - 3 new unit tests (`test_non_meal_title_sauces_and_dips`, `test_non_meal_title_standalone_terms`, `test_non_meal_title_allows_real_meals`). Total: 49 unit tests.
 
 **Remaining:**
 - Basic accessibility pass

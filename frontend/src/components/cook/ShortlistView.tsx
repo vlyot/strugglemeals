@@ -343,6 +343,11 @@ export function ShortlistView({ results, loading, progress, presenting, userIngr
         </div>
       </div>
 
+      {/* Disclaimer */}
+      <p className="text-xs text-muted-foreground/70 text-center px-2">
+        Results are AI-matched and may not be a perfect fit — check ingredients before you start cooking.
+      </p>
+
       {/* Theme tabs */}
       <Tabs value={activeTheme} onValueChange={(v) => setActiveTheme(v as Theme)} className="flex-col">
         <TabsList className="w-full h-10">
