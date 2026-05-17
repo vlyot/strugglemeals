@@ -253,9 +253,33 @@ _Depends on Phase 6. Final phase before real-world validation._
   - **Optional badge in missing panel** (`frontend/src/components/cook/ShortlistView.tsx`): missing ingredients with `optional: true` render a small "optional" pill badge inline — visually distinguishes hard-to-find required ingredients from pantry staples the user almost certainly has or can skip.
   - **Category-level Groq substitutes** (`backend/src/ai.rs`, `call_groq()` system prompt): Groq is now instructed to give the most general category-level substitution possible — "any neutral oil" not "vegetable oil", "any acid" not "white wine vinegar", "any crunchy pickle" not "cornichons". For regional/specialty ingredients (e.g. "Texas style hot pickled okra pods"), Groq describes the functional role in the dish rather than naming an alternative ("any pickled vegetable for crunch and acidity").
 
+- **Search latency reduction — 3 targeted fixes (current):**
+
+  **Root cause:** every recipe search was a full-table scan on 1.94M rows via `json_each(ingredients_core) LIKE ?` — no index can help this query. Railway's NGINX proxy was also buffering both SSE events together, collapsing the two-phase UX benefit.
+
+  1. **FTS5 inverted index** (`backend/src/ai.rs`, `backend/src/main.rs`, `backend/src/lib.rs`):
+     - `CREATE VIRTUAL TABLE recipes_fts USING fts5(ingredients_text, content='recipes', content_rowid='id', tokenize='unicode61 remove_diacritics 1')` — one row per recipe, ingredients stored as space-joined text.
+     - Background migration spawned in `main.rs` via `tokio::spawn` + `spawn_blocking` — server accepts traffic on the existing `json_each` path while the table builds (~2–5 min on first deploy), then switches transparently.
+     - `fts_ready: Arc<AtomicBool>` added to `AppState`; flips to `true` when migration completes.
+     - `fetch_candidates_fts()`: replaces `EXISTS (SELECT 1 FROM json_each(…) WHERE LOWER(value) LIKE ?)` with `WHERE r.id IN (SELECT rowid FROM recipes_fts WHERE ingredients_text MATCH ?)`.
+     - MATCH expression built by `build_fts_match()` — each ingredient double-quoted (`"egg"`) to enforce exact token match (prevents `"egg"` → `"eggplant"` false positives, consistent with `tokens_overlap`).
+     - Relaxation path updated: `build_fts_match_relaxed()` expands `stem_variants` into the MATCH expression.
+     - `rusqlite` feature updated from `["bundled"]` → `["bundled", "bundled-full"]` to enable `SQLITE_ENABLE_FTS5` at compile time.
+  2. **SSE anti-buffering header** (`backend/src/ai.rs`, `theme_shortlist`):
+     - Return type changed from `Sse<impl Stream<…>>` to `impl IntoResponse`.
+     - `X-Accel-Buffering: no` added as a response header via `HeaderMap` — tells Railway's NGINX to flush each SSE chunk immediately so the `scores` event reaches the browser before Groq finishes.
+  3. **Rayon parallel scoring + `spawn_blocking`** (`backend/src/ai.rs`, `fetch_candidates`):
+     - `rayon = "1"` added to `Cargo.toml`.
+     - Both `fetch_candidates` calls in `theme_shortlist` wrapped in `tokio::task::spawn_blocking` — SQLite I/O no longer blocks the tokio executor.
+     - `fetch_candidates` restructured: Phase 1 collects raw SQLite tuples sequentially (required by rusqlite); Phase 2 scores via `into_par_iter()` (rayon).
+     - `score_raw_rows()` helper extracted — shared by primary and relaxation paths.
+     - `fts_query_raw()` helper executes any FTS5 MATCH SQL and returns raw tuples.
+     - `RawRow` type alias hoisted to module level (was function-local, caused clippy `type_complexity` lint).
+     - 5 new unit tests: `test_build_fts_match_single`, `test_build_fts_match_multiple`, `test_build_fts_match_strips_quotes`, `test_build_fts_match_relaxed_expands_variants`, `test_build_fts_match_relaxed_berry_variant`.
+     - Total unit tests: 43 (up from 38). All pass, zero clippy warnings.
+
 **Remaining:**
-- Re-authenticate Railway (`railway login`) to monitor deployment of commit `d1e7afe`
-- Performance check — ingredient query response time acceptable, no obvious bottlenecks
+- FTS5 migration on first Railway deploy (happens automatically, ~2–5 min, no downtime)
 - Basic accessibility pass
 - Copy and microcopy review — tone consistent, helper text clear
 - README and GitHub repository cleaned up for portfolio presentation

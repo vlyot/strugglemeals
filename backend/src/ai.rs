@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,
@@ -12,6 +12,8 @@ use std::convert::Infallible;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use rayon::prelude::*;
 
 use crate::AppState;
 
@@ -176,22 +178,14 @@ async fn call_gemini(
     );
 
     let prompt = concat!(
-        "You are a kitchen assistant. Analyse this fridge/pantry photo and return a JSON object ",
+        "You are a kitchen assistant. Analyse this photo and return ONLY a raw JSON object (no markdown, no code fences) ",
         "with exactly three keys:\n",
-        "- \"detected\": array of objects for each distinct raw food ingredient you can see. ",
-        "Each object: {\"name\": \"<lowercase string>\", \"confidence\": <float 0.0-10.0>}. ",
-        "Confidence reflects how certain you are it is present and identifiable ",
-        "(10.0 = unmistakably clear, 5.0 = plausible but partially obscured, 1.0 = barely visible guess).\n",
-        "- \"likely_have\": array of lowercase strings — common pantry staples not visible but ",
-        "almost certainly present given the detected ingredients (e.g. salt, oil, garlic). Max 6 items.\n",
-        "- \"legend\": object with three keys \"high\", \"mid\", \"low\" each a short phrase explaining ",
-        "the confidence bands to show the user. ",
-        "Example: {\"high\": \"clearly visible\", \"mid\": \"partially visible\", \"low\": \"hard to tell\"}.\n\n",
-        "Example output:\n",
-        "{\"detected\":[{\"name\":\"chicken\",\"confidence\":9.2},{\"name\":\"broccoli\",\"confidence\":7.1}],",
-        "\"likely_have\":[\"salt\",\"oil\",\"garlic\"],",
-        "\"legend\":{\"high\":\"clearly visible\",\"mid\":\"partially visible\",\"low\":\"hard to tell\"}}\n\n",
-        "Return ONLY the JSON object, nothing else."
+        "- \"detected\": array of {\"name\":\"<lowercase>\",\"confidence\":<0.0-10.0>} for each visible food ingredient. ",
+        "10=unmistakably clear, 5=partially obscured, 1=barely visible.\n",
+        "- \"likely_have\": array of up to 6 lowercase pantry staples almost certainly present (e.g. salt, oil, garlic).\n",
+        "- \"legend\": {\"high\":\"clearly visible\",\"mid\":\"partially visible\",\"low\":\"hard to tell\"}.\n\n",
+        "Example: {\"detected\":[{\"name\":\"chicken\",\"confidence\":9.2}],\"likely_have\":[\"salt\"],",
+        "\"legend\":{\"high\":\"clearly visible\",\"mid\":\"partially visible\",\"low\":\"hard to tell\"}}"
     );
 
     let payload = json!({
@@ -208,7 +202,10 @@ async fn call_gemini(
         }],
         "generationConfig": {
             "temperature": 0.1,
-            "maxOutputTokens": 1024
+            "maxOutputTokens": 2048,
+            "thinkingConfig": {
+                "thinkingBudget": 0
+            }
         }
     });
 
@@ -412,7 +409,7 @@ pub struct IngredientQty {
     pub qty: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ShortlistRequest {
     pub ingredients: Vec<String>,
     pub ingredients_with_qty: Option<Vec<IngredientQty>>,
@@ -466,21 +463,32 @@ fn build_shortlist_entries(candidates: &[CandidateRow]) -> Vec<ShortlistEntry> {
 
 /// SSE endpoint: emits two events — "scores" immediately (pure Rust), then "themes" after Groq.
 /// The frontend renders recipe cards on the first event and updates theme labels on the second.
+/// X-Accel-Buffering: no tells Railway's NGINX proxy to flush each SSE event immediately
+/// instead of batching them, so the two-phase UX benefit is preserved in production.
 pub async fn theme_shortlist(
     State(state): State<AppState>,
     Json(body): Json<ShortlistRequest>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> impl IntoResponse {
     let user_ings = resolve_user_ings(&body);
 
-    // Fetch candidates; emit empty scores on any validation/DB failure.
+    // Fetch candidates via spawn_blocking so the SQLite scan + rayon scoring
+    // run on the blocking thread pool, freeing the tokio executor.
+    let fts_ready = state.fts_ready.load(std::sync::atomic::Ordering::Relaxed);
     let initial_entries = if body.ingredients.is_empty() || user_ings.is_empty() {
         vec![]
     } else {
-        match fetch_candidates(&state.sqlite, &body, &user_ings) {
-            Ok(candidates) if !candidates.is_empty() => build_shortlist_entries(&candidates),
-            Ok(_) => vec![],
-            Err(e) => {
+        let pool = state.sqlite.clone();
+        let body_c = body.clone();
+        let ings_c = user_ings.clone();
+        match tokio::task::spawn_blocking(move || fetch_candidates(&pool, &body_c, &ings_c, fts_ready)).await {
+            Ok(Ok(candidates)) if !candidates.is_empty() => build_shortlist_entries(&candidates),
+            Ok(Ok(_)) => vec![],
+            Ok(Err(e)) => {
                 tracing::error!("theme_shortlist SQLite error: {e}");
+                vec![]
+            }
+            Err(e) => {
+                tracing::error!("theme_shortlist spawn_blocking panic: {e}");
                 vec![]
             }
         }
@@ -502,8 +510,12 @@ pub async fn theme_shortlist(
             return None;
         }
         let user_ings2 = resolve_user_ings(&body);
-        let candidates = match fetch_candidates(&state.sqlite, &body, &user_ings2) {
-            Ok(c) if !c.is_empty() => c,
+        let fts_ready2 = state.fts_ready.load(std::sync::atomic::Ordering::Relaxed);
+        let pool2 = state.sqlite.clone();
+        let body_c2 = body.clone();
+        let ings_c2 = user_ings2.clone();
+        let candidates = match tokio::task::spawn_blocking(move || fetch_candidates(&pool2, &body_c2, &ings_c2, fts_ready2)).await {
+            Ok(Ok(c)) if !c.is_empty() => c,
             _ => return None,
         };
         match call_groq_shortlist(&state, &candidates, &user_ings2).await {
@@ -523,7 +535,13 @@ pub async fn theme_shortlist(
     let s = stream::once(async move { Ok::<_, Infallible>(scores_event) })
         .chain(themes_stream.map(Ok::<_, Infallible>));
 
-    Sse::new(s).keep_alive(KeepAlive::default())
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+
+    (headers, Sse::new(s).keep_alive(KeepAlive::default()))
 }
 
 // ---------------------------------------------------------------------------
@@ -770,12 +788,158 @@ fn stem_variants(name: &str) -> Vec<String> {
     v
 }
 
+// ---------------------------------------------------------------------------
+// FTS5 fast-path candidate fetch
+// ---------------------------------------------------------------------------
+
+/// Raw column tuple returned by both json_each and FTS5 SQLite queries.
+type RawRow = (i64, String, Option<String>, i64, bool, bool, bool, String, String);
+
+/// Shared row-scoring logic: maps raw SQLite columns into a CandidateRow with
+/// score_v2 applied. Used by both the primary and relaxation FTS5 queries.
+fn score_raw_rows(
+    raw_rows: Vec<RawRow>,
+    user_ings: &[IngredientQty],
+    cuisine_req: &Option<String>,
+) -> Vec<CandidateRow> {
+    raw_rows
+        .into_par_iter()
+        .map(|(id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
+            let ingredients_core = parse_json_str_array(&core_raw);
+            let directions = parse_json_str_array(&dir_raw);
+            let (mut score, matched_ingredients) = score_v2(user_ings, &ingredients_core, &title);
+            if let (Some(ref req), Some(ref rec)) = (cuisine_req, &cuisine) {
+                let rl = rec.to_lowercase();
+                let rql = req.to_lowercase();
+                if rl.contains(rql.as_str()) || rql.contains(rl.as_str()) {
+                    score *= 1.25;
+                }
+            }
+            let total = ingredient_count as f64;
+            let core_len = ingredients_core.len() as f64;
+            if total > 0.0 {
+                let pantry_ratio = ((total - core_len) / total).clamp(0.0, 1.0);
+                score *= (1.0 - pantry_ratio.powi(2) * 0.7).max(0.1);
+            }
+            let match_count = matched_ingredients.len();
+            CandidateRow { id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, ingredients_core, directions, score, match_count, matched_ingredients }
+        })
+        .filter(|r| r.match_count > 0)
+        .collect()
+}
+
+/// Execute a FTS5 MATCH query and return raw column tuples.
+fn fts_query_raw(
+    conn: &rusqlite::Connection,
+    match_expr: &str,
+    filter_sql: &str,
+    limit: usize,
+) -> Result<Vec<RawRow>, String> {
+    let sql = format!(
+        "SELECT r.id, r.title, r.cuisine, r.ingredient_count, \
+         r.vegetarian, r.vegan, r.gluten_free, r.ingredients_core, r.directions \
+         FROM recipes r \
+         WHERE r.id IN (SELECT rowid FROM recipes_fts WHERE ingredients_text MATCH ?1) \
+         {filter_sql} \
+         ORDER BY r.ingredient_count ASC \
+         LIMIT {limit}",
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![match_expr], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)? != 0,
+                row.get::<_, i64>(5)? != 0,
+                row.get::<_, i64>(6)? != 0,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(rows)
+}
+
+/// FTS5-backed candidate fetch. Replaces the json_each EXISTS scan with an
+/// inverted-index MATCH lookup, then scores results with rayon in parallel.
+fn fetch_candidates_fts(
+    conn: &rusqlite::Connection,
+    body: &ShortlistRequest,
+    user_ings: &[IngredientQty],
+) -> Result<Vec<CandidateRow>, String> {
+    let mut filter_sql = String::new();
+    if body.vegetarian == Some(true) { filter_sql.push_str(" AND r.vegetarian = 1"); }
+    if body.vegan == Some(true)      { filter_sql.push_str(" AND r.vegan = 1"); }
+    if body.gluten_free == Some(true){ filter_sql.push_str(" AND r.gluten_free = 1"); }
+
+    let match_expr = build_fts_match(user_ings);
+    let raw_rows = fts_query_raw(conn, &match_expr, &filter_sql, 500)?;
+    let cuisine_req = body.cuisine.clone();
+    let mut rows = score_raw_rows(raw_rows, user_ings, &cuisine_req);
+
+    rows.sort_unstable_by(|a, b| {
+        b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.ingredient_count.cmp(&b.ingredient_count))
+    });
+    rows.truncate(20);
+
+    if rows.len() < 3 {
+        let relaxed_match = build_fts_match_relaxed(user_ings);
+        if relaxed_match.is_empty() {
+            return Ok(rows);
+        }
+        let relaxed_raw = fts_query_raw(conn, &relaxed_match, &filter_sql, 200)?;
+        let mut relaxed = score_raw_rows(relaxed_raw, user_ings, &cuisine_req);
+        relaxed.sort_unstable_by(|a, b| {
+            b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.ingredient_count.cmp(&b.ingredient_count))
+        });
+        relaxed.truncate(5);
+        return Ok(relaxed);
+    }
+
+    Ok(rows)
+}
+
+/// Build a FTS5 MATCH expression: `"egg" OR "sour cream" OR "udon"`.
+/// Each term is double-quoted to enforce exact token matching, preventing
+/// "egg" from matching "eggplant" and "pea" from matching "peanut".
+fn build_fts_match(user_ings: &[IngredientQty]) -> String {
+    user_ings
+        .iter()
+        .map(|ui| format!("\"{}\"", ui.name.replace('"', "")))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// Same as build_fts_match but expands each name into its stem variants
+/// (plural/singular) for the relaxation path.
+fn build_fts_match_relaxed(user_ings: &[IngredientQty]) -> String {
+    user_ings
+        .iter()
+        .flat_map(|ui| stem_variants(&ui.name))
+        .map(|v| format!("\"{}\"", v.replace('"', "")))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 fn fetch_candidates(
     pool: &crate::SqlitePool,
     body: &ShortlistRequest,
     user_ings: &[IngredientQty],
+    fts_ready: bool,
 ) -> Result<Vec<CandidateRow>, String> {
     let conn = pool.get().map_err(|e| e.to_string())?;
+
+    // FTS5 fast path: uses pre-built inverted index instead of json_each scan.
+    if fts_ready {
+        return fetch_candidates_fts(&conn, body, user_ings);
+    }
 
     let n = user_ings.len();
 
@@ -821,9 +985,10 @@ fn fetch_candidates(
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
 
+    // Phase 1: collect raw column tuples from SQLite (sequential — rusqlite requires it).
     // Column indices: 0=id, 1=title, 2=cuisine, 3=ingredient_count,
     //                 4=vegetarian, 5=vegan, 6=gluten_free, 7=ingredients_core, 8=directions
-    let mut rows: Vec<CandidateRow> = stmt
+    let raw_rows: Vec<RawRow> = stmt
         .query_map(rusqlite::params_from_iter(all_params.iter()), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
@@ -839,12 +1004,19 @@ fn fetch_candidates(
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
+        .collect();
+
+    // Phase 2: score candidates in parallel across rayon's thread pool.
+    // score_v2 is pure (no shared mutable state); user_ings is Sync.
+    let cuisine_req = body.cuisine.clone();
+    let mut rows: Vec<CandidateRow> = raw_rows
+        .into_par_iter()
         .map(|(id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
             let ingredients_core = parse_json_str_array(&core_raw);
             let directions = parse_json_str_array(&dir_raw);
             let (mut score, matched_ingredients) = score_v2(user_ings, &ingredients_core, &title);
             // Cuisine boost: 1.25× if recipe cuisine matches user preference (partial, case-insensitive)
-            if let (Some(ref req), Some(ref rec)) = (&body.cuisine, &cuisine) {
+            if let (Some(ref req), Some(ref rec)) = (&cuisine_req, &cuisine) {
                 let rl = rec.to_lowercase();
                 let rql = req.to_lowercase();
                 if rl.contains(rql.as_str()) || rql.contains(rl.as_str()) {
@@ -906,7 +1078,8 @@ fn fetch_candidates(
         let relaxed_all: Vec<&String> = relaxed_like.iter().chain(relaxed_like.iter()).collect();
 
         let mut stmt2 = conn.prepare(&relaxed_sql).map_err(|e| e.to_string())?;
-        let mut relaxed: Vec<CandidateRow> = stmt2
+        // Phase 1: collect raw rows (sequential)
+        let relaxed_raw: Vec<RawRow> = stmt2
             .query_map(rusqlite::params_from_iter(relaxed_all.iter()), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -922,11 +1095,15 @@ fn fetch_candidates(
             })
             .map_err(|e| e.to_string())?
             .filter_map(|r| r.ok())
+            .collect();
+        // Phase 2: score in parallel
+        let mut relaxed: Vec<CandidateRow> = relaxed_raw
+            .into_par_iter()
             .map(|(id, title, cuisine, ingredient_count, vegetarian, vegan, gluten_free, core_raw, dir_raw)| {
                 let ingredients_core = parse_json_str_array(&core_raw);
                 let directions = parse_json_str_array(&dir_raw);
                 let (mut score, matched_ingredients) = score_v2(user_ings, &ingredients_core, &title);
-                if let (Some(ref req), Some(ref rec)) = (&body.cuisine, &cuisine) {
+                if let (Some(ref req), Some(ref rec)) = (&cuisine_req, &cuisine) {
                     let rl = rec.to_lowercase();
                     let rql = req.to_lowercase();
                     if rl.contains(rql.as_str()) || rql.contains(rl.as_str()) {
@@ -1772,6 +1949,50 @@ mod scoring_tests {
             score_a > score_b,
             "recipe using more of the user's diverse pantry ({score_a:.3}) should beat one using fewer ({score_b:.3})"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // FTS5 helper tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_build_fts_match_single() {
+        let ings = vec![ing("egg", "1 qty")];
+        let expr = build_fts_match(&ings);
+        assert_eq!(expr, "\"egg\"");
+    }
+
+    #[test]
+    fn test_build_fts_match_multiple() {
+        let ings = vec![ing("egg", "1 qty"), ing("sour cream", "a little"), ing("udon", "plenty")];
+        let expr = build_fts_match(&ings);
+        assert_eq!(expr, "\"egg\" OR \"sour cream\" OR \"udon\"");
+    }
+
+    #[test]
+    fn test_build_fts_match_strips_quotes() {
+        // Double-quotes in ingredient names must be stripped to avoid breaking MATCH syntax.
+        let ings = vec![ing("\"fancy\" cheese", "1 qty")];
+        let expr = build_fts_match(&ings);
+        assert_eq!(expr, "\"fancy cheese\"");
+    }
+
+    #[test]
+    fn test_build_fts_match_relaxed_expands_variants() {
+        let ings = vec![ing("egg", "1 qty")];
+        let expr = build_fts_match_relaxed(&ings);
+        // stem_variants("egg") → ["egg", "eggs"]
+        assert!(expr.contains("\"egg\""), "should include original: {expr}");
+        assert!(expr.contains("\"eggs\""), "should include plural: {expr}");
+    }
+
+    #[test]
+    fn test_build_fts_match_relaxed_berry_variant() {
+        let ings = vec![ing("berries", "1 qty")];
+        let expr = build_fts_match_relaxed(&ings);
+        // stem_variants("berries") → ["berries", "berry"]
+        assert!(expr.contains("\"berry\""), "should include singular: {expr}");
+        assert!(expr.contains("\"berries\""), "should include original: {expr}");
     }
 }
 

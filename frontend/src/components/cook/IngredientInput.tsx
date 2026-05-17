@@ -199,7 +199,9 @@ export function IngredientInput({
         setNudgeDismissed(false)
         setTab("text")
       } else {
-        setPhotoError("Couldn't identify ingredients. Try a clearer photo.")
+        const reason = data.message ?? "Couldn't identify ingredients. Try a clearer photo."
+        console.warn("[identify-ingredients] no ingredients:", reason, "error:", data.error)
+        setPhotoError(reason)
       }
     } catch {
       setPhotoError("Upload failed. Please try again.")
@@ -484,17 +486,16 @@ export function IngredientInput({
             {suggestions.map((name) => (
               <span
                 key={name}
-                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-dashed border-border bg-background text-sm text-muted-foreground"
+                onClick={() => onAcceptSuggestion?.(name)}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full border border-dashed border-border bg-background text-sm text-muted-foreground cursor-pointer hover:border-primary hover:text-foreground transition-colors"
               >
                 {name}
-                <button
-                  type="button"
-                  onClick={() => onAcceptSuggestion?.(name)}
-                  className="ml-1 text-primary hover:text-primary/80 font-medium leading-none transition-colors"
+                <span
+                  className="ml-1 text-primary font-medium leading-none"
                   aria-label={`Add ${name}`}
                 >
                   +
-                </button>
+                </span>
                 <button
                   type="button"
                   onClick={() => onDismissSuggestion?.(name)}

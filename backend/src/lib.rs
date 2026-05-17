@@ -6,7 +6,7 @@ pub mod history;
 pub mod recipes;
 
 use r2d2_sqlite::SqliteConnectionManager;
-use std::sync::Arc;
+use std::sync::{atomic::AtomicBool, Arc};
 
 pub type SqlitePool = Arc<r2d2::Pool<SqliteConnectionManager>>;
 
@@ -17,6 +17,9 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub gemini_api_key: String,
     pub groq_api_key: String,
+    /// Set to true once the FTS5 recipes_fts table is fully populated.
+    /// While false, fetch_candidates falls back to the json_each scan.
+    pub fts_ready: Arc<AtomicBool>,
 }
 
 // Allow axum's FromRef to extract SqlitePool from AppState (used by recipes handler)

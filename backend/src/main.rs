@@ -7,7 +7,7 @@ use axum::{
 use dotenvy::dotenv;
 use r2d2_sqlite::SqliteConnectionManager;
 use sqlx::postgres::PgPoolOptions;
-use std::{env, sync::Arc};
+use std::{env, sync::{atomic::{AtomicBool, Ordering}, Arc}};
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -58,8 +58,61 @@ async fn main() {
     }
 
     let http = reqwest::Client::new();
+    let fts_ready = Arc::new(AtomicBool::new(false));
 
-    let state = AppState { pg, sqlite, http, gemini_api_key, groq_api_key };
+    // Spawn FTS5 migration in background so the server accepts traffic immediately.
+    // Once complete, fts_ready flips to true and all subsequent recipe searches
+    // use the fast FTS5 MATCH path instead of the json_each full-table scan.
+    {
+        let fts_sqlite = sqlite.clone();
+        let fts_flag = fts_ready.clone();
+        tokio::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || {
+                let conn = fts_sqlite.get().expect("sqlite conn for fts migration");
+
+                let fts_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='recipes_fts'",
+                    [],
+                    |row| row.get(0),
+                ).unwrap_or(0);
+                let recipe_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM recipes", [], |row| row.get(0),
+                ).unwrap_or(0);
+                let fts_row_count: i64 = if fts_count > 0 {
+                    conn.query_row("SELECT COUNT(*) FROM recipes_fts", [], |row| row.get(0)).unwrap_or(0)
+                } else { 0 };
+
+                if fts_count == 0 || fts_row_count < recipe_count {
+                    tracing::info!("Running FTS5 migration ({recipe_count} recipes)...");
+                    conn.execute_batch(
+                        "CREATE VIRTUAL TABLE IF NOT EXISTS recipes_fts
+                             USING fts5(
+                                 ingredients_text,
+                                 content='recipes',
+                                 content_rowid='id',
+                                 tokenize='unicode61 remove_diacritics 1'
+                             );
+                         INSERT INTO recipes_fts(rowid, ingredients_text)
+                         SELECT r.id,
+                                (SELECT group_concat(je.value, ' ')
+                                 FROM json_each(r.ingredients_core) je)
+                         FROM recipes r
+                         WHERE r.id NOT IN (SELECT rowid FROM recipes_fts);",
+                    ).expect("FTS5 migration failed");
+                    tracing::info!("FTS5 migration complete.");
+                } else {
+                    tracing::info!("FTS5 table already present ({fts_row_count} rows), skipping migration.");
+                }
+            }).await;
+
+            match result {
+                Ok(()) => fts_flag.store(true, Ordering::Relaxed),
+                Err(e) => tracing::error!("FTS5 migration task panicked: {e:?}"),
+            }
+        });
+    }
+
+    let state = AppState { pg, sqlite, http, gemini_api_key, groq_api_key, fts_ready };
 
     // Support multiple comma-separated origins in FRONTEND_URL
     let origins: Vec<HeaderValue> = frontend_url
