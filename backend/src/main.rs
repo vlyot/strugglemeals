@@ -88,21 +88,24 @@ async fn main() {
 
                 if fts_count == 0 || fts_row_count < recipe_count {
                     tracing::info!("Running FTS5 migration ({recipe_count} recipes)...");
+                    // Plain FTS5 table — stores its own copy of ingredients_text.
+                    // Content tables (content='recipes') require a special rebuild
+                    // flow and cannot be populated with a direct INSERT...SELECT.
                     conn.execute_batch(
                         "CREATE VIRTUAL TABLE IF NOT EXISTS recipes_fts
                              USING fts5(
                                  ingredients_text,
-                                 content='recipes',
-                                 content_rowid='id',
                                  tokenize='unicode61 remove_diacritics 1'
-                             );
-                         INSERT INTO recipes_fts(rowid, ingredients_text)
+                             );",
+                    ).expect("FTS5 create failed");
+                    conn.execute_batch(
+                        "INSERT INTO recipes_fts(rowid, ingredients_text)
                          SELECT r.id,
                                 (SELECT group_concat(je.value, ' ')
                                  FROM json_each(r.ingredients_core) je)
                          FROM recipes r
                          WHERE r.id NOT IN (SELECT rowid FROM recipes_fts);",
-                    ).expect("FTS5 migration failed");
+                    ).expect("FTS5 populate failed");
                     tracing::info!("FTS5 migration complete.");
                 } else {
                     tracing::info!("FTS5 table already present ({fts_row_count} rows), skipping migration.");
