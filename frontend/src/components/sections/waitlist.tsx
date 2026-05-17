@@ -34,8 +34,7 @@ export function WaitlistSection() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    console.log("[StruggleMeals] Waitlist submission:", formState)
-    setSubmitted(true)
+setSubmitted(true)
   }
 
   const reveal = (delay: string, fromY = "40px") => ({

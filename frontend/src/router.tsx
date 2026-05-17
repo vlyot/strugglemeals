@@ -24,7 +24,11 @@ export const router = createBrowserRouter([
   },
   {
     path: "/handler/:pathParam?",
-    element: <AuthView />,
+    element: (
+      <div className="min-h-screen flex items-center justify-center bg-background px-4">
+        <AuthView />
+      </div>
+    ),
   },
   {
     element: <ProtectedRoute />,
