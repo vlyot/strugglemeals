@@ -46,10 +46,13 @@ async fn main() {
             .expect("Failed to open SQLite pool"),
     );
     // Apply performance pragmas once at startup.
-    // journal_mode returns a result row so it must use pragma_update, not execute_batch.
+    // journal_mode returns the active mode as a result row, so pragma_update
+    // (which calls execute_batch) fails with ExecuteReturnedResults.
+    // pragma_update_and_check uses query_row internally and handles it correctly.
+    // synchronous and cache_size do not return rows — pragma_update is fine.
     {
         let conn = sqlite.get().expect("Failed to get SQLite connection for pragmas");
-        conn.pragma_update(None, "journal_mode", "WAL")
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))
             .expect("Failed to set WAL mode");
         conn.pragma_update(None, "synchronous", "NORMAL")
             .expect("Failed to set synchronous=NORMAL");
