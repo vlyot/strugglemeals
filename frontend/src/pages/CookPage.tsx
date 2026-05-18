@@ -1,4 +1,5 @@
 import { Fragment, useState, useEffect, useRef } from "react"
+import { usePageTitle } from "@/hooks/usePageTitle"
 import {
   streamShortlist,
   fetchRecipeDetail,
@@ -17,13 +18,14 @@ import { MethodSelector } from "@/components/cook/MethodSelector"
 import { ShortlistView } from "@/components/cook/ShortlistView"
 import { RecipeModal } from "@/components/cook/RecipeModal"
 import { AuthNudgeBanner } from "@/components/sections/results"
-import { Link } from "react-router-dom"
+import { Link, useLocation } from "react-router-dom"
 import { authClient } from "@/stack/client"
 
 type Step = "method" | "input" | "shortlist"
 
 export default function CookPage() {
   const { data: session } = authClient.useSession()
+  const location = useLocation()
 
   // Ingredient state
   const [ingredients, setIngredients] = useState<IngredientWithQty[]>([])
@@ -43,6 +45,8 @@ export default function CookPage() {
 
   // Flow state
   const [step, setStep] = useState<Step>("method")
+  const stepTitle = step === "method" ? "Cook" : step === "input" ? "Ingredients" : "Recipes"
+  usePageTitle(stepTitle)
   const [defaultTab, setDefaultTab] = useState<"text" | "photo">("text")
   const [shortlistLoading, setShortlistLoading] = useState(false)
   const [shortlistProgress, setShortlistProgress] = useState(0)
@@ -74,6 +78,25 @@ export default function CookPage() {
   const [modalResponse, setModalResponse] = useState<PresentResponse | null>(null)
   const [modalLoading, setModalLoading] = useState(false)
   const [modalError, setModalError] = useState<string | null>(null)
+
+  // Open recipe modal directly when navigating from Favourites/History with a recipeId
+  useEffect(() => {
+    const state = location.state as { recipeId?: number; recipeTitle?: string } | null
+    if (!state?.recipeId) return
+    const id = state.recipeId
+    const title = state.recipeTitle ?? ""
+    setModalRecipeId(id)
+    setModalRecipeTitle(title)
+    setModalResponse(null)
+    setModalError(null)
+    setModalLoading(true)
+    setModalOpen(true)
+    fetchRecipeDetail(id)
+      .then((detail) => presentRecipe(detail, []))
+      .then((presented) => setModalResponse(presented))
+      .catch(() => setModalError("Couldn't prepare this recipe right now. Please try again."))
+      .finally(() => setModalLoading(false))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleMethodSelect = (method: "text" | "photo") => {
     setDefaultTab(method)

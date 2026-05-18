@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { usePageTitle } from "@/hooks/usePageTitle";
 import { Link } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -49,6 +50,7 @@ function FavouriteCard({ entry, onRemove }: FavouriteCardProps) {
         <p className="text-xs text-muted-foreground">Saved {formatSavedDate(entry.saved_at)}</p>
         <Link
           to="/cook"
+          state={{ recipeId: entry.recipe_id, recipeTitle: entry.recipe_name }}
           className="mt-3 block w-full text-center text-sm font-medium text-primary-foreground bg-primary rounded-lg py-2 hover:bg-primary/90 transition-colors"
         >
           Cook →
@@ -59,6 +61,7 @@ function FavouriteCard({ entry, onRemove }: FavouriteCardProps) {
 }
 
 export default function FavouritesPage() {
+  usePageTitle("Favourites")
   const [favourites, setFavourites] = useState<FavouriteEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
