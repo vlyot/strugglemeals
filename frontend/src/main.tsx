@@ -20,6 +20,7 @@ createRoot(document.getElementById('root')!).render(
       social={{ providers: ['google'] }}
       emailOTP
       signUp={{ fields: ['name'] }}
+      account={{ fields: ['image', 'name'] }}
     >
       <RouterProvider router={router} />
     </NeonAuthUIProvider>

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { usePageTitle } from "@/hooks/usePageTitle";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -72,6 +73,7 @@ function HistoryRow({ entry, isSaved, onSave, onDelete }: HistoryRowProps) {
 }
 
 export default function HistoryPage() {
+  usePageTitle("Cook History")
   const [entries, setEntries] = useState<HistoryEntry[]>([]);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("all");

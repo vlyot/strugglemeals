@@ -1,3 +1,4 @@
+import { usePageTitle } from "@/hooks/usePageTitle"
 import { Header } from "@/components/header"
 import { Footer } from "@/components/footer"
 import { HeroSection } from "@/components/sections/hero"
@@ -7,6 +8,7 @@ import { HowItWorksSection } from "@/components/sections/how-it-works"
 import { ExamplesSection } from "@/components/sections/examples"
 
 export default function App() {
+  usePageTitle("")
   return (
     <main className="min-h-screen bg-background">
       <Header />

@@ -84,7 +84,8 @@ _Independent of Phases 2, 4, and 5. Can run in parallel once Phase 1 is done._
 - Integration test suite at `backend/tests/auth_integration.rs` covers 401s, CRUD, idempotency, per-user isolation
 - Frontend: `@neondatabase/neon-js` wired in `main.tsx` + `stack/client.ts`; `router.tsx` has `ProtectedRoute` + `/handler/:pathParam` auth view; `HistoryPage` + `FavouritesPage` pages; `lib/api.ts` sends `x-stack-refresh-token` on all auth calls
 - Header shows History/Favourites links + `UserButton` when signed in; Sign in CTA when not
-- Vercel env vars required: `VITE_NEON_AUTH_URL=https://ep-purple-mouse-aod4wg5j.c-2.ap-southeast-1.aws.neon.tech/neondb/auth`; Railway `FRONTEND_URL=https://strugglemeal.vercel.app` (set)
+- Vercel env vars required: `VITE_NEON_AUTH_URL=https://ep-purple-mouse-aod4wg5j.neonauth.c-2.ap-southeast-1.aws.neon.tech/neondb/auth`; Railway `FRONTEND_URL=https://strugglemeal.vercel.app` (set)
+- **Auth URL hostname:** must use `neonauth` subdomain (`ep-{id}.neonauth.{region}.aws.neon.tech`) — the plain `neon.tech` endpoint is the SQL-over-HTTP gateway which does not serve auth routes and blocks all CORS preflights
 
 **Status: COMPLETE** — backend live, frontend wired, DB schema provisioned, Vercel env vars pending manual deploy
 

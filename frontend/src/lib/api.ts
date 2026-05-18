@@ -1,11 +1,9 @@
-import { authClient } from "@/stack/client";
+import { getSessionToken } from "@/stack/client";
 
 const API_URL = import.meta.env.VITE_API_URL ?? "http://localhost:8080";
 
 async function authHeaders(): Promise<Record<string, string>> {
-  // getSession() fetches the current session including the token
-  const { data } = await authClient.getSession();
-  const token = data?.session?.token;
+  const token = await getSessionToken();
   if (!token) throw new Error("Not authenticated");
   return {
     "x-stack-refresh-token": token,
